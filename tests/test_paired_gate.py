@@ -327,7 +327,16 @@ def test_gpu_trial_recipes_are_one_change_from_the_pinned_baseline():
 
 
 @pytest.mark.parametrize(
-    "flaw", [None, "different_gpu", "missing_device", "changed_server", "tracing"]
+    "flaw",
+    [
+        None,
+        "different_gpu",
+        "missing_device",
+        "changed_server",
+        "tracing",
+        "invariant_server",
+        "missing_mode",
+    ],
 )
 def test_offline_vllm_report_requires_attested_same_device(tmp_path, flaw):
     sut_dir = Path(__file__).resolve().parents[1] / "configs" / "sut"
@@ -355,7 +364,11 @@ def test_offline_vllm_report_requires_attested_same_device(tmp_path, flaw):
             "instance_sha256": "b" * 64,
             "device_id": device["device_id"],
             "pin_sha256": digest(plan["arms"][arm]),
+            "VLLM_BATCH_INVARIANT": "1" if bad and flaw == "invariant_server" else "0",
+            "worker_trace": "off",
         }
+        if bad and flaw == "missing_mode":
+            del live["VLLM_BATCH_INVARIANT"]
         if bad and flaw == "missing_device":
             del device["device_id"]
         write_json(root / name / RUN_FILE, doc)

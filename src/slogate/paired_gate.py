@@ -134,9 +134,11 @@ def _inspect(root: Path, name: str, arm: str, plan: dict, hash_: str) -> dict[st
         require(
             before == observation["after"]
             and before["pin_sha256"] == digest(plan["arms"][arm])
+            and before.get("VLLM_BATCH_INVARIANT") == "0"
+            and before.get("worker_trace") == "off"
             and len(before["instance_sha256"]) == 64
             and before["device_id"] == doc["meta"]["sut_info"]["host"]["gpus"][0]["device_id"],
-            "vLLM endpoint, config or device not stable across capture",
+            "vLLM endpoint, normal performance mode, config or device not verified across capture",
         )
     rr = ReplayResult.from_dict(dict(doc["replay"], records=read_records(directory)))
     require(

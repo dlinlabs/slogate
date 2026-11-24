@@ -220,6 +220,26 @@ def test_engine_build_probe_isolated_from_client_and_checks_every_pin(monkeypatc
         exact._engine_build("/chosen/engine/python")
 
 
+def test_bad_key_or_transport_message_is_never_saved(tmp_path, monkeypatch, capsys):
+    root, sha = configured(tmp_path)
+    state = {"stamps": 0, "calls": 0}
+    wire(monkeypatch, state)
+    monkeypatch.setenv("VLLM_API_KEY", "test-secret\n")
+    assert take(root, sha, "reference") == 4
+    assert "test-secret" not in capsys.readouterr().err
+    assert not (root / "reference").exists()
+    monkeypatch.setenv("VLLM_API_KEY", "test-secret")
+
+    def broken_client(**kwargs):
+        raise httpx.LocalProtocolError("invalid header containing test-secret")
+
+    monkeypatch.setattr(exact.httpx, "Client", broken_client)
+    assert take(root, sha, "reference") == 4
+    receipt = (root / "reference" / "receipt.json").read_text()
+    assert "LocalProtocolError" in receipt and "test-secret" not in receipt
+    assert not (root / "reference" / "evidence.json").exists()
+
+
 def test_public_capture_cli_over_real_loopback_with_stubbed_gpu_identity(tmp_path, monkeypatch):
     """Only the HTTP round trip is real; outputs/identity are test doubles in tmp_path."""
     root, sha = configured(tmp_path)

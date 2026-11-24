@@ -30,6 +30,15 @@ ENGINE = {"vllm": "0.30.0", "torch": "2.13.0+cu130", "cuda_runtime": "13.0"}
 ERRORS = (OSError, ValueError, KeyError, TypeError, httpx.HTTPError, subprocess.SubprocessError)
 
 
+def _api_key() -> str:
+    key = os.environ.get("VLLM_API_KEY", "")
+    require(
+        bool(key) and all(0x21 <= ord(char) <= 0x7E for char in key),
+        "a nonempty ASCII VLLM_API_KEY without whitespace is required in the environment",
+    )
+    return key
+
+
 def prepare(ab: Path, suite_path: Path, out: Path) -> str:
     plan, plan_hash = load_plan(ab)
     suite = json.loads(suite_path.read_bytes())
@@ -311,6 +320,10 @@ def collect(
             write_json(arm / "report.json", verdict)
             receipt["correctness"] = verdict["status"]
             rc = EXIT[verdict["status"]]
+    except httpx.HTTPError as exc:
+        # Transport exceptions can include header values. Store only the exception class.
+        receipt.update(status="unverified", reason=f"HTTP transport error: {type(exc).__name__}")
+        rc = 4
     except ERRORS as exc:
         receipt.update(status="unverified", reason=str(exc))
         rc = 4
@@ -368,10 +381,8 @@ def _command(args: argparse.Namespace) -> int:
                     )
                 )
                 return 0
-            require(
-                sys.platform == "linux" and bool(os.environ.get("VLLM_API_KEY")),
-                "Linux and VLLM_API_KEY required for execution",
-            )
+            require(sys.platform == "linux", "Linux is required for execution")
+            _api_key()
             require(
                 not os.environ.get("SLOGATE_TRACE_DIR") and not (root / args.role).exists(),
                 "trace enabled or previous arm attempt exists",
@@ -399,8 +410,7 @@ def _command(args: argparse.Namespace) -> int:
                 os.dup2(log.fileno(), 1)
                 os.dup2(log.fileno(), 2)
             os.execve(argv_[0], argv_, {**os.environ, "VLLM_BATCH_INVARIANT": "1"})
-        key = os.environ.get("VLLM_API_KEY", "")
-        require(bool(key), "VLLM_API_KEY is required; never pass the secret on the command line")
+        key = _api_key()
         rc, receipt = collect(
             root,
             spec,

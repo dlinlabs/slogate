@@ -116,4 +116,6 @@ def verify_server(
         "instance_sha256": instance,
         "pin_sha256": digest(expected),
         "device_id": device,
+        "VLLM_BATCH_INVARIANT": "1" if batch_invariant else "0",
+        "worker_trace": "off",
     }

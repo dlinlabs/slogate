@@ -155,9 +155,32 @@ separate. Reaching `pass` in one gate does not excuse a failure, unverified outp
 insufficient evidence in the other. Even two passes would cover only the declared suite,
 configuration and workload, not all outputs or deployment requirements.
 
+From an installed client checkout, these steps prepare the trial and preview the first
+performance slot. They do **not** contact a server or reserve a GPU:
+
+```bash
+python scripts/prepare_small_budget.py prepare --out trial \
+  --workload workloads/azure-2024-05-12-smoke-30s.json.gz
+# Save the printed plan and receipt pins separately. For a delivered trial, verify
+# its trusted pins and skip preparation; never regenerate a new plan on the Pod.
+python scripts/prepare_small_budget.py slot trial --slot pair-001-A \
+  --receipt-sha256 "$RECEIPT_SHA"
+```
+
+The preview checks the files, the next slot, and previous slot receipts. The printed
+recipe is **manual**, for an already-authorized, supervised Linux host. `begin` checks an
+idle GPU/port and reserves that slot; `record` checks the owned listener, environment,
+new SUT manifest and whether the GPU processes belong to that server before calling
+`slogate ab record`. It does not manage Pod billing or guarantee a wall-clock cutoff.
+Use the real GPU and process namespace; if the engine binary or GPU processes cannot be
+identified, do not bypass the check. No cloud credentials belong in the performance
+process environment. Keep model downloads and engine bootstrap outside measured slots.
+
 E0 replays drained in about 152-153 s. If both arms took that long, **12 replays alone
-would occupy about 30.5 GPU-minutes**, excluding model startup, switching, warmups,
-correctness and export. Actual B cost and effect are unknown. Do not treat the 60
+would occupy about 30.6 GPU-minutes**. One observed startup span (not a readiness
+guarantee) was 212 s. If **all 12** starts were comparable, that adds 42.4 minutes:
+**about 73 minutes before probes, warmups, switching/teardown, correctness and export**.
+Actual B cost and effect are unknown. Do not treat the 60
 GPU-minute design target as a promise or silently lower the pair count to fit. If the
 approved window is insufficient, retain the partial slots, export evidence and report
 inconclusive. No Pod is required for preparation or for validating the bundle.

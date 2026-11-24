@@ -27,7 +27,14 @@ def listener_inodes(process: Path, address: str, port: int) -> set[str]:
     return sockets
 
 
-def verify_server(pid: int, url: str, expected: dict, declared_device: dict) -> dict[str, str]:
+def process_instance(pid: int) -> str:
+    started = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    return digest([pid, started])
+
+
+def verify_server(
+    pid: int, url: str, expected: dict, declared_device: dict, *, batch_invariant: bool = False
+) -> dict[str, str]:
     local_url(url)
     require(
         sys.platform == "linux" and type(pid) is int and pid > 0,
@@ -43,7 +50,7 @@ def verify_server(pid: int, url: str, expected: dict, declared_device: dict) -> 
         "API server and client must share the measured loopback network namespace",
     )
     # PID + kernel start tick detects replacement even if the numeric PID gets reused.
-    started = (proc / "stat").read_text().rsplit(")", 1)[1].split()[19]
+    instance = process_instance(pid)
     listeners = listener_inodes(proc, host, port)
     found = False
     for fd in (proc / "fd").iterdir():
@@ -71,6 +78,18 @@ def verify_server(pid: int, url: str, expected: dict, declared_device: dict) -> 
         serve_flags(argv[3:]) == expected["flags"] | fixed,
         "live vLLM launch options differ from pinned arm",
     )
+    # Only inspect two mode switches on the already identified listener. Never persist
+    # the environment (in particular the API key) or include it in an error message.
+    switches = {}
+    for item in (proc / "environ").read_bytes().split(b"\0"):
+        key, _, value = item.partition(b"=")
+        if key in (b"VLLM_BATCH_INVARIANT", b"SLOGATE_TRACE_DIR"):
+            switches[key] = value
+    require(
+        switches.get(b"VLLM_BATCH_INVARIANT", b"0") == (b"1" if batch_invariant else b"0"),
+        "API server batch-invariance mode does not match this run",
+    )
+    require(not switches.get(b"SLOGATE_TRACE_DIR"), "worker trace enabled on the API server")
     gpu = (
         subprocess.run(
             ["nvidia-smi", "--query-gpu=uuid,driver_version", "--format=csv,noheader"],
@@ -92,12 +111,9 @@ def verify_server(pid: int, url: str, expected: dict, declared_device: dict) -> 
         and declared_device["driver_version"] == driver.strip(),
         "live GPU or driver differs from SUT manifest",
     )
-    require(
-        (proc / "stat").read_text().rsplit(")", 1)[1].split()[19] == started,
-        "API server PID changed",
-    )
+    require(process_instance(pid) == instance, "API server PID changed")
     return {
-        "instance_sha256": digest([pid, started]),
+        "instance_sha256": instance,
         "pin_sha256": digest(expected),
         "device_id": device,
     }

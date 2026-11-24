@@ -12,7 +12,9 @@ and cross-layer attribution are planned, not shipped.
 > succeeded). Read the **[weeks 1-2 report](docs/weeks-01-02.md)** for the failed first
 > attempt, the client fix and what the [six measured GPU runs](docs/results/e0-2026-11-23.csv)
 > actually show. A [same-host paired TTFT gate](docs/paired-gate.md) now has CPU controls.
-> Independent GPU A/B validation, measured error rates and GPU trace validation are pending.
+> The first real [2048 vs 512 trial](docs/paired-gate.md#first-real-trial-small-budget)
+> is prepared, not measured. Independent GPU A/B validation, measured error rates and GPU
+> trace validation are pending.
 
 ## Why
 

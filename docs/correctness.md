@@ -5,6 +5,77 @@ UTF-8 JSON files and writes a JSON report to stdout. `python -m slogate.correctn
 accepts the same flags independently of the top-level CLI. Neither command runs a
 model, contacts a server, reads a performance replay, or modifies the inputs.
 
+## Native vLLM collection for the small-budget trial
+
+`slogate vllm-exact` is the **separate collector**, limited to the reference Qwen3 revision,
+RTX 4090 and vLLM 0.30.0. Only `capture` contacts an already-authorized local server.
+`server` prints argv by default; it starts the engine only with `--execute`. Preparing
+an experiment or installing slogate does not require vLLM, Torch, model weights or a GPU.
+
+The [suite](../configs/correctness/qwen3-small-budget.json) fixes four non-sensitive
+**input ID** sequences (10, 34, 552 and 2,081 tokens) and a 24-token output cap. They are
+raw text-completion token sequences, not a model-quality benchmark or a chat-template test.
+The two long inputs exercise both sides of the budget boundary. The identities are digests
+of **manifests** for the immutable model/tokenizer revision and expanded suite, not a local
+rehash of every model weight. The Hub tokenizer artifact digest is included in its manifest.
+
+```bash
+# Local preparation: AB is the frozen ab/ directory; EXACT must be new.
+slogate vllm-exact prepare --ab "$AB" --suite configs/correctness/qwen3-small-budget.json --out "$EXACT"
+# Save the printed spec SHA-256 independently. For the delivered bundle use its saved
+# spec and digest instead of regenerating them. This prints argv only:
+slogate vllm-exact server "$EXACT" --role reference --spec-sha256 "$SPEC_SHA" --engine-python "$ENGINE_PY"
+```
+
+**Later, only on an explicitly authorized Linux GPU host**: use one dedicated server per
+arm. Supply the key through `VLLM_API_KEY`, never as an argument. The foreground server
+action `exec`s the given engine interpreter with the resolved arm flags plus
+`--generation-config vllm --dtype bfloat16 --attention-backend FLASH_ATTN` and
+`VLLM_BATCH_INVARIANT=1`; these are correctness-only settings. Output goes to a new
+`reference.server.log` or `candidate.server.log`. Probe `/health` before reserving a capture.
+Use the **actual API listener PID**, not an SSH shell, and stop only the owned server and
+workers after each phase. Examples for a prepared checkout:
+
+```bash
+# A: start with the previewed argv, then wait for its authenticated /health.
+slogate vllm-exact server "$EXACT" --role reference --spec-sha256 "$SPEC_SHA" --engine-python "$ENGINE_PY" --execute &
+A_PID=$!
+# Once ready:
+slogate vllm-exact capture "$EXACT" --role reference --spec-sha256 "$SPEC_SHA" --server-pid "$A_PID"
+# Save the printed plan_sha256 OFF the Pod along with reference/plan.json, evidence.json
+# and its receipt. Stop the owned A service; confirm it has exited before starting B.
+slogate vllm-exact server "$EXACT" --role candidate --spec-sha256 "$SPEC_SHA" --plan-sha256 "$PLAN_SHA" --engine-python "$ENGINE_PY" --execute &
+B_PID=$!
+# Once ready:
+slogate vllm-exact capture "$EXACT" --role candidate --spec-sha256 "$SPEC_SHA" --plan-sha256 "$PLAN_SHA" --server-pid "$B_PID"
+slogate correctness --plan "$EXACT/reference/plan.json" --plan-sha256 "$PLAN_SHA" \
+  --reference "$EXACT/reference/evidence.json" --candidate "$EXACT/candidate/evidence.json"
+```
+
+Before and after each capture the collector checks the listener/argv, hashed physical GPU
+identity, driver, engine-build receipt, startup log bound to that process (resolved dtype
+and attention backend), and the server's batch-invariance/trace mode. The ordinary paired
+performance path rejects a batch-invariant correctness server. Start performance with
+the original arm flags and normal runtime settings instead; never pool correctness latency.
+
+For each case, collect nonstreaming `/v1/completions` with `return_token_ids=true`, first
+as singletons and then as one reversed prompt batch. Pair choices by **index and echoed
+prompt IDs**. Use only `choices[].token_ids`, verify natural EOS or the full declared output
+length, and reconcile the aggregate usage. **Never** retokenize output text, infer IDs from
+counts, or use the synthetic controls as a fallback. Input/mode/usage/within-arm control
+failures produce `unverified` (exit 4); no valid reference plan can be minted from that
+attempt. A complete, internally stable candidate whose IDs differ from A yields `fail`
+(exit 2), not `unverified`. Keep attempt directories, including partial ID observations
+and failed receipts. Nothing overwrites a prior arm. Batch invariance here is checked for
+these cases on each particular configuration, not claimed for every Qwen model/input.
+
+Upstream sources checked 2026-11-24: [completion request/response fields](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/entrypoints/openai/completion/protocol.py),
+[native IDs in nonstreaming responses](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/entrypoints/openai/completion/serving.py),
+[batch invariance requirements and tested models](https://github.com/vllm-project/vllm/blob/v0.30.0/docs/features/batch_invariance.md),
+[explicit CUDA backend validation](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/platforms/cuda.py)
+and [pinned Qwen files](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/tree/cdbee75f17c01a7cc42f958dc650907174af0554).
+Collector tests use HTTP test doubles; they are **not evidence of a real model run**.
+
 ## Try the synthetic controls
 
 From an installed checkout, use a **new** output directory. The demo leaves small,

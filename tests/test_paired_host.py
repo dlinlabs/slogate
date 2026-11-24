@@ -28,7 +28,8 @@ def test_collect_host_emits_fingerprint_not_raw_gpu_uuid(monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="reference launcher uses Linux procfs")
-def test_live_listener_argv_and_device(tmp_path, monkeypatch):
+@pytest.mark.parametrize("invariant", [False, True])
+def test_live_listener_argv_and_device(tmp_path, monkeypatch, invariant):
     # A test double owns a real loopback listener with the reference launcher's argv.
     package = tmp_path / "vllm" / "entrypoints" / "openai"
     package.mkdir(parents=True)
@@ -68,19 +69,30 @@ def test_live_listener_argv_and_device(tmp_path, monkeypatch):
             stdout=subprocess.PIPE,
             text=True,
             pass_fds=(sock.fileno(),),
-            env={**os.environ, "PYTHONPATH": str(tmp_path)},
+            env={
+                **os.environ,
+                "PYTHONPATH": str(tmp_path),
+                "SLOGATE_TRACE_DIR": "",
+                "VLLM_BATCH_INVARIANT": "1" if invariant else "0",
+            },
         )
         try:
             assert proc.stdout is not None and proc.stdout.readline().strip() == "ready"
-            assert verify_server(proc.pid, url, expected, device)["pin_sha256"] == digest(expected)
+
+            def verify(pin=expected, gpu=device):
+                return verify_server(proc.pid, url, pin, gpu, batch_invariant=invariant)
+
+            assert verify()["pin_sha256"] == digest(expected)
+            with pytest.raises(ValueError, match="batch-invariance mode"):
+                verify_server(proc.pid, url, expected, device, batch_invariant=not invariant)
             with pytest.raises(ValueError, match="launch options"):
-                verify_server(proc.pid, url, dict(expected, flags={}), device)
+                verify(dict(expected, flags={}))
             with pytest.raises(ValueError, match="GPU or driver"):
-                verify_server(proc.pid, url, expected, dict(device, driver_version="other"))
+                verify(gpu=dict(device, driver_version="other"))
             with monkeypatch.context() as m:
                 m.setattr(Path, "samefile", lambda *_: False)
                 with pytest.raises(ValueError, match="network namespace"):
-                    verify_server(proc.pid, url, expected, device)
+                    verify()
         finally:
             proc.communicate(timeout=5)
     assert not Path(f"/proc/{proc.pid}").exists()

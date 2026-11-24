@@ -137,3 +137,27 @@ before and after the run; unrecognizable process titles, proxies, inaccessible p
 missing evidence are not substitutes for these checks. Remote/tunneled endpoints,
 multi-GPU, engine upgrades, power calibration and real token/logprob collection are not
 qualified by the CPU demo.
+
+### First real trial: small budget
+
+Reference A is the frozen E0 configuration (`max_num_batched_tokens=2048`); B changes
+only that setting to `512`. **Before any B results** the operator selected **+2,000 ms**
+for the practical B-minus-A increase in run-level TTFT p99 under this heavily queued
+workload. It is not the 10 ms CPU-demo margin, a derived MDE, or an absolute production
+SLO. TPOT and ITL remain recorded secondary metrics; do not select a new primary based
+on the result. Use six adjacent A/B pairs (12 fresh runs), one pair per statistical
+block, two warmups per run, unchanged 50 ms fidelity checks and no worker trace.
+Do not fill A slots with old E0 artifacts. Independence is an assumption; fixed AB order
+does not eliminate a within-pair time trend.
+
+Keep the [native token-ID correctness capture](correctness.md#native-vllm-collection-for-the-small-budget-trial)
+separate. Reaching `pass` in one gate does not excuse a failure, unverified output or
+insufficient evidence in the other. Even two passes would cover only the declared suite,
+configuration and workload, not all outputs or deployment requirements.
+
+E0 replays drained in about 152-153 s. If both arms took that long, **12 replays alone
+would occupy about 30.5 GPU-minutes**, excluding model startup, switching, warmups,
+correctness and export. Actual B cost and effect are unknown. Do not treat the 60
+GPU-minute design target as a promise or silently lower the pair count to fit. If the
+approved window is insufficient, retain the partial slots, export evidence and report
+inconclusive. No Pod is required for preparation or for validating the bundle.

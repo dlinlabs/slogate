@@ -1,0 +1,27 @@
+{
+  "name": "vllm-0.30.0_qwen3-4b-instruct-2507_rtx4090",
+  "engine": {
+    "name": "vllm",
+    "python": "3.12",
+    "requirements": ["vllm==0.30.0", "torch==2.13.0+cu130"],
+    "pip_args": [
+      "--only-binary=:all:",
+      "--extra-index-url",
+      "https://download.pytorch.org/whl/cu130"
+    ],
+    "expect": {"vllm": "0.30.0", "torch": "2.13.0+cu130", "cuda_runtime": "13.0"}
+  },
+  "model": {
+    "id": "Qwen/Qwen3-4B-Instruct-2507",
+    "revision": "cdbee75f17c01a7cc42f958dc650907174af0554"
+  },
+  "hardware": {"gpu_name_contains": "RTX 4090", "gpu_count": 1},
+  "serve_args": [
+    "--max-model-len", "8192",
+    "--max-num-batched-tokens", "2048",
+    "--max-num-seqs", "32",
+    "--tensor-parallel-size", "1",
+    "--no-enable-prefix-caching"
+  ],
+  "notes": "Engine pins and serve flags match the dlinlabs/vllm-serving-lab PR32 runtime."
+}

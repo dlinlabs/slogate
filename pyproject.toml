@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slogate"
+version = "0.1.0.dev0"
+description = "SLO regression gate for LLM inference engines"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Daniel Lin" }]
+dependencies = [
+    "aiohttp>=3.12,<4",
+    "httpx>=0.27",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+fake-engine = [
+    "starlette>=0.37",
+    "uvicorn>=0.30",
+]
+dev = [
+    "slogate[fake-engine]",
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+slogate = "slogate.cli:main"
+
+[project.entry-points."vllm.general_plugins"]
+slogate = "slogate.vllm_plugin:register"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+slogate = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]

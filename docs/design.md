@@ -1,6 +1,6 @@
 # slogate design
 
-Version 0.1 (week 2). This page states what slogate claims, how it will be judged, and what
+Version 0.1 (week 3 in progress). This page states what slogate claims, how it will be judged, and what
 it deliberately does not do.
 
 ## Claim
@@ -108,7 +108,11 @@ practical effect. The predecessor lab found that treating correlated time blocks
 independent inflated nominal false passes to about 14%, so blocks within a run are never
 counted as independent samples.
 
-### Week 3 comparison contract (planned, not implemented)
+### Week 3 comparison contract
+
+The first implementation covers one run-level metric, `ttft_s.p99`, and one configuration
+change. See the [paired gate](paired-gate.md) for the capture format, signed-effect convention,
+order-statistic interval and CPU controls. The statistical error targets are not release claims.
 
 1. Before looking at B, freeze the workload digest, hardware/driver, model/tokenizer revision,
    warmup, allowed candidate change, primary metric/direction, SLO, practical regression

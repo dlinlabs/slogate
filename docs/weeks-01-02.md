@@ -64,5 +64,5 @@ hosts; they are not an engine A/B comparison.
 
 **Next milestone:** use same-host baseline/candidate pairs and an output correctness check.
 Freeze the practical regression margin before observing the candidate, and allow an
-*inconclusive* result. The [week 3 gate](design.md#week-3-comparison-contract-planned-not-implemented)
-is a design, not a shipped pass/fail decision.
+*inconclusive* result. At the close of week 2 this was still a design; see the
+[week 3 gate](paired-gate.md) for subsequent implementation and remaining validation.

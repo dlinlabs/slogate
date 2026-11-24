@@ -7,11 +7,12 @@ latency worse, and which layer is responsible? The first milestone is a measurem
 that can distinguish an invalid load test from a slow server. A calibrated regression verdict
 and cross-layer attribution are planned, not shipped.
 
-> **Status: week 2 GPU baseline complete.** With the revised client, all six untraced
+> **Status: week 3 paired-gate MVP.** With the revised client, all six untraced
 > RTX 4090 A/A runs passed the unchanged load-fidelity checks (4,722/4,722 requests
 > succeeded). Read the **[weeks 1-2 report](docs/weeks-01-02.md)** for the failed first
 > attempt, the client fix and what the [six measured GPU runs](docs/results/e0-2026-11-23.csv)
-> actually show. The paired regression gate and GPU trace validation are pending.
+> actually show. A [same-host paired TTFT gate](docs/paired-gate.md) now has CPU controls.
+> Independent GPU A/B validation, measured error rates and GPU trace validation are pending.
 
 ## Why
 
@@ -21,6 +22,9 @@ scheduled load. If the client stalls, keep the run as evidence but do not blame 
 
 ## What works today
 
+- **Paired comparison.** Freeze one candidate change and a practical margin before collecting
+  interleaved A/B runs. Report relative performance, any configured absolute p99 ceiling,
+  invalid measurements and insufficient evidence separately.
 - **Open-loop replay.** Every request launches on its scheduled arrival time and never waits
   for earlier responses, so a slow server shows up as latency instead of as reduced load.
 - **Per-token timelines.** TTFT, per-token inter-token latency (multi-token chunks are split
@@ -52,6 +56,25 @@ regression a paired comparison could detect. Each `run-NNN/` folder holds `run.j
 (metadata, fidelity verdict, metrics) and `records.json.gz` (every request's timeline), so
 metrics can be recomputed without rerunning.
 
+For the week 3 gate, this one command collects and scores four local controls: unchanged
+A/A, deliberately slow B, underpowered B, and a mislabeled endpoint. Use a fresh directory:
+
+```bash
+python scripts/paired_demo.py --out runs/week3-controls
+```
+
+Read `scorecard.json` first, then each `gate.md` for its interval and per-pair deltas.
+The 10 ms margin applies to these fake-engine examples only, not to the GPU baseline.
+
+| CPU control (2026-11-23) | Paired TTFT p99 effect, B minus A | Observed performance verdict |
+|---|---:|---|
+| Same fake build, 6 pairs | interval: -2.65 to +3.94 ms | Pass |
+| Add 60 ms to the fake first-token setting, 6 pairs | interval: +37.48 to +44.66 ms | Fail |
+| Same delayed setting, only 2 pairs | no finite 95% interval | Inconclusive |
+| Label the unchanged endpoint as the delayed candidate | wrong identity, interval not evaluated | Invalid measurement |
+
+All 750 measured requests returned successfully. These are [recorded CPU controls](docs/results/week3-cpu-pairs-2026-11-23.csv), not a measurement of the three planned vLLM changes or a production false-alarm rate.
+
 ## Against vLLM on a GPU
 
 `configs/sut/` pins a system under test (engine version, model revision, serve flags), and
@@ -69,6 +92,10 @@ instrumented measurements are diagnostics, not SLO samples.
 | 0 | `run`: client fidelity passed. `aa`/`noise`: at least three valid runs with no failed requests; check `excluded_runs` for the rest |
 | 1 | Usage or input error |
 | 3 | Invalid measurement: load fidelity failed, or fewer than three healthy A/A runs |
+
+For `ab report`, exits are **0** performance pass, **2** performance/SLO failure, **3**
+invalid measurement, **4** inconclusive, and **1** input error. See the [paired evidence
+contract](docs/paired-gate.md) before using the result in CI.
 
 ## Development
 

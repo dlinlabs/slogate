@@ -1,0 +1,16 @@
+case,pair,a_ttft_p99_ms,b_ttft_p99_ms,b_minus_a_ms,success_a,success_b,arm_identity_matches
+unchanged,1,45.266,44.213,-1.054,25,25,true
+unchanged,2,46.639,48.409,1.770,25,25,true
+unchanged,3,47.102,44.451,-2.650,25,25,true
+unchanged,4,47.606,47.501,-0.105,25,25,true
+unchanged,5,47.213,45.121,-2.092,25,25,true
+unchanged,6,42.535,46.480,3.945,25,25,true
+delayed,1,47.598,88.861,41.263,25,25,true
+delayed,2,47.752,89.225,41.472,25,25,true
+delayed,3,47.431,89.259,41.828,25,25,true
+delayed,4,44.053,88.717,44.664,25,25,true
+delayed,5,44.829,88.860,44.032,25,25,true
+delayed,6,51.722,89.198,37.477,25,25,true
+underpowered,1,44.235,88.762,44.527,25,25,true
+underpowered,2,46.653,88.591,41.938,25,25,true
+wrong-arm,1,43.642,43.669,0.026,25,25,false

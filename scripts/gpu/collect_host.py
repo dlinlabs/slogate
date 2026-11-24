@@ -4,6 +4,7 @@ Fails when the host does not match the config (wrong GPU model or count), so a r
 wrong hardware never produces numbers that look comparable.
 """
 
+import hashlib
 import json
 import os
 import platform
@@ -33,16 +34,20 @@ def gpus() -> list[dict[str, str]]:
     output = run(
         [
             "nvidia-smi",
-            f"--query-gpu={','.join(GPU_FIELDS)}",
+            f"--query-gpu=uuid,{','.join(GPU_FIELDS)}",
             "--format=csv,noheader,nounits",
         ]
     )
     if output.startswith("unavailable"):
         return []
-    return [
-        dict(zip(GPU_FIELDS, (part.strip() for part in line.split(",")), strict=True))
-        for line in output.splitlines()
-    ]
+    devices = []
+    for line in output.splitlines():
+        uuid, *fields = (part.strip() for part in line.split(","))
+        device = dict(zip(GPU_FIELDS, fields, strict=True))
+        if uuid.startswith("GPU-"):
+            device["device_id"] = hashlib.sha256(uuid.encode()).hexdigest()
+        devices.append(device)
+    return devices
 
 
 def cpu_model() -> str:

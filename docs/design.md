@@ -128,6 +128,9 @@ order-statistic interval and CPU controls. The statistical error targets are not
 
 ## Correctness
 
+The [offline correctness checker](correctness.md) checks independent evidence against
+a frozen manifest. A synthetic pass demonstrates checker behavior, not vLLM output quality.
+
 - **Scheduler-only changes:** run with `VLLM_BATCH_INVARIANT=1` and require exact token matches.
 - **Kernel, precision or version changes:** compare logprob drift and a small task evaluation
   against tolerances fixed before the run.

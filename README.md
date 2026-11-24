@@ -25,6 +25,9 @@ scheduled load. If the client stalls, keep the run as evidence but do not blame 
 - **Paired comparison.** Freeze one candidate change and a practical margin before collecting
   interleaved A/B runs. Report relative performance, any configured absolute p99 ceiling,
   invalid measurements and insufficient evidence separately.
+- **[Output correctness](docs/correctness.md).** Check separate token-ID evidence for
+  scheduler changes, or compare same-prefix logprobs and a fixed-answer eval. Missing
+  evidence is unverified; these checks are not implied by a performance pass.
 - **Open-loop replay.** Every request launches on its scheduled arrival time and never waits
   for earlier responses, so a slow server shows up as latency instead of as reduced load.
 - **Per-token timelines.** TTFT, per-token inter-token latency (multi-token chunks are split
@@ -74,6 +77,11 @@ The 10 ms margin applies to these fake-engine examples only, not to the GPU base
 | Label the unchanged endpoint as the delayed candidate | wrong identity, interval not evaluated | Invalid measurement |
 
 All 750 measured requests returned successfully. These are [recorded CPU controls](docs/results/week3-cpu-pairs-2026-11-23.csv), not a measurement of the three planned vLLM changes or a production false-alarm rate.
+
+For the separate [correctness controls](docs/correctness.md), run
+`python scripts/correctness_demo.py --out runs/correctness-demo`. The examples include a
+changed token, numerical drift with an unchanged answer, a lost answer with unchanged
+scores, and a missing score. No model is invoked.
 
 ## Against vLLM on a GPU
 

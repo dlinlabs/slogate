@@ -79,8 +79,8 @@ without a completed seal is invalid, not a slot that may be overwritten. The MVP
 all planned pairs: no post hoc exclusions, early statistical decisions or replacement
 samples. Set `--candidate-ceiling-ms` **at init** to also check an absolute per-run
 TTFT p99 requirement on B. Without a supplied ceiling the absolute SLO is `not_configured`.
-The correctness command checks different evidence; volume of streamed tokens is not a
-substitute for actual token IDs or scores on matched prefixes.
+The [correctness command](correctness.md) checks different evidence; volume of streamed
+tokens is not a substitute for actual token IDs or scores on matched prefixes.
 
 ## Statistical sanity check (not GPU calibration)
 

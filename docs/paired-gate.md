@@ -104,7 +104,7 @@ resamples the six published run p99s with replacement; it does **not** preserve 
 dependence and is not a held-out trial. Neither result certifies a production false-alarm
 rate or the proposed 80% detection-power target at the E0 MDE.
 
-## Pinned vLLM trials (prepared, not measured)
+## Pinned vLLM trials
 
 ```bash
 PYTHONPATH=src python scripts/week3_candidates.py --out runs/week3-candidates
@@ -118,7 +118,7 @@ GPU-relevant margin separately. The generator does not start engines or spend GP
 |---|---|---|
 | `eager` | add `--enforce-eager` | Not measured |
 | `small-graphs` | set `--compilation-config '{"cudagraph_capture_sizes":[1,2,4,8]}'` | Not measured |
-| `small-budget` | set `--max-num-batched-tokens` from 2048 to 512 | Not measured |
+| `small-budget` | set `--max-num-batched-tokens` from 2048 to 512 | [Measured: 6/6 pairs, relative TTFT pass](#first-real-trial-small-budget) |
 
 These flags may worsen a chosen metric, improve it, or have no material effect. They are
 not three detected GPU regressions. Option names were checked against [vLLM v0.30.0
@@ -140,20 +140,55 @@ qualified by the CPU demo.
 
 ### First real trial: small budget
 
-Reference A is the frozen E0 configuration (`max_num_batched_tokens=2048`); B changes
-only that setting to `512`. **Before any B results** the operator selected **+2,000 ms**
-for the practical B-minus-A increase in run-level TTFT p99 under this heavily queued
-workload. It is not the 10 ms CPU-demo margin, a derived MDE, or an absolute production
-SLO. TPOT and ITL remain recorded secondary metrics; do not select a new primary based
-on the result. Use six adjacent A/B pairs (12 fresh runs), one pair per statistical
-block, two warmups per run, unchanged 50 ms fidelity checks and no worker trace.
-Do not fill A slots with old E0 artifacts. Independence is an assumption; fixed AB order
-does not eliminate a within-pair time trend.
+**What changed.** In [vLLM v0.30.0's scheduler config](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/config/scheduler.py),
+`max_num_batched_tokens` limits the tokens processed **across sequences in a single
+iteration**. This [pinned configuration](../configs/sut/vllm-0.30.0_qwen3-4b-instruct-2507_rtx4090.json)
+uses chunked prefill with no speculative decoding. A used `2048`; B changed that one
+performance flag to `512`, a quarter of A's budget. The separate `max_num_seqs=32`,
+`max_model_len=8192` and performance workload's `max_tokens=128` did not change.
+These are vLLM settings and workload limits; slogate did not modify the scheduler or kernels.
 
-Keep the [native token-ID correctness capture](correctness.md#native-vllm-collection-for-the-small-budget-trial)
-separate. Reaching `pass` in one gate does not excuse a failure, unverified output or
-insufficient evidence in the other. Even two passes would cover only the declared suite,
-configuration and workload, not all outputs or deployment requirements.
+For example, suppose 16 ongoing sequences each need one decode token this step, with
+room for a new sequence and sufficient KV cache. After scheduling those 16 tokens, A
+has at most `2048 - 16 = 2032` tokens left for prompt work; B has `512 - 16 = 496`.
+An uncached 1,200-token prompt **could** fit in one A step, but must span at least three
+B steps. This is a budget example, not a trace of an observed step. It illustrates the
+[chunked-prefill trade-off](https://github.com/vllm-project/vllm/blob/v0.30.0/docs/configuration/optimization.md#chunked-prefill):
+larger chunks can finish incoming prompts sooner; smaller chunks can leave ongoing
+decodes waiting less between outputs.
+
+**Decision fixed before collection.** Would B increase run-level TTFT p99 by at least
+2,000 ms on this heavily queued workload? TTFT was the only performance gate. The
+plan called for six fresh pairs in fixed A1/B1 through A6/B6 order, one pair per
+statistical block and two warmup requests per run. No absolute latency SLO was set.
+
+**What was measured (2026-11-25 UTC).** On the same RTX 4090 and pinned Qwen3/vLLM
+build, the client scheduled 787 requests over 30 seconds each run, then waited for all
+responses. All 12 runs passed the original 50 ms client-fidelity checks; 9,444/9,444
+requests completed. No worker trace was enabled, no old E0 run was substituted, and no
+pair was excluded.
+
+- **Primary verdict:** B had a longer p99 wait for the first token in every pair. The
+  median of the six paired TTFT p99 differences was **+1,039.38 ms**, with a two-sided sign interval of
+  **[+960.42, +1,207.35] ms** (96.875% nominal coverage assuming independent pairs).
+  Its upper bound was below the **+2,000 ms** practical margin frozen before B: **pass**.
+  This is neither equality nor an absolute serving SLO. Fixed A-before-B order cannot
+  rule out a time-order effect.
+- **Secondary trade-off:** comparing the medians of each arm's six run p99s, TPOT went
+  from **53.34 to 50.63 ms/token** and visible ITL from **152.45 to 58.82 ms**. These were
+  not gate criteria. On 178 A streams and 159 B streams, visible token counts differed
+  from final usage; ITL is client-observed, not an exact GPU timestamp for every token.
+  No step or kernel was timed to establish the cause.
+- **Separate [correctness check](correctness.md#native-vllm-collection-for-the-small-budget-trial):**
+  A and B produced identical native token IDs for all four frozen cases (24 output tokens
+  each), including a 2,081-token prompt. Running each case alone or in a reverse-order
+  batch also gave identical IDs within each arm. This covers the suite, not all prompts.
+
+[Per-pair data (CSV, milliseconds)](results/small-budget-2026-11-25.csv). Paired differences
+are calculated before rounding; the median paired difference need not equal the difference
+of the two arm medians. Trial source: [`e9a8c0f`](https://github.com/dlinlabs/slogate/commit/e9a8c0fbdea56002c1299ffdf4533c8dba6dc7a1).
+
+#### Reproducing the trial
 
 From an installed client checkout, these steps prepare the trial and preview the first
 performance slot. They do **not** contact a server or reserve a GPU:
@@ -176,11 +211,9 @@ Use the real GPU and process namespace; if the engine binary or GPU processes ca
 identified, do not bypass the check. No cloud credentials belong in the performance
 process environment. Keep model downloads and engine bootstrap outside measured slots.
 
-E0 replays drained in about 152-153 s. If both arms took that long, **12 replays alone
-would occupy about 30.6 GPU-minutes**. One observed startup span (not a readiness
-guarantee) was 212 s. If **all 12** starts were comparable, that adds 42.4 minutes:
-**about 73 minutes before probes, warmups, switching/teardown, correctness and export**.
-Actual B cost and effect are unknown. Do not treat the 60
-GPU-minute design target as a promise or silently lower the pair count to fit. If the
-approved window is insufficient, retain the partial slots, export evidence and report
-inconclusive. No Pod is required for preparation or for validating the bundle.
+Before collection, the estimate was 30.6 GPU-minutes for 12 E0-like replays or about
+73 minutes with 12 E0-like cold starts, before other overhead. The observed single-GPU
+window from host preflight through off-host archive verification was **59.89 minutes**,
+not a billing reading or a guarantee that a repeat fits in 60 minutes. If an approved
+window is insufficient, retain partial slots and report incomplete evidence rather
+than changing the number of pairs. Preparation itself needs no Pod.

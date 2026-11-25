@@ -2,19 +2,41 @@
 
 **An SLO regression gate for LLM inference engines.**
 
-slogate replays a fixed workload to answer two questions: did a candidate build make serving
-latency worse, and which layer is responsible? The first milestone is a measurement harness
-that can distinguish an invalid load test from a slow server. A calibrated regression verdict
-and cross-layer attribution are planned, not shipped.
+slogate replays a fixed workload before a serving change ships. It checks whether the
+client delivered the intended load, then compares baseline and candidate latency against
+a margin chosen before the trial. Locating a regression in a specific runtime layer is
+still a separate, unvalidated step.
 
 > **Status: week 3 paired-gate MVP.** With the revised client, all six untraced
 > RTX 4090 A/A runs passed the unchanged load-fidelity checks (4,722/4,722 requests
 > succeeded). Read the **[weeks 1-2 report](docs/weeks-01-02.md)** for the failed first
 > attempt, the client fix and what the [six measured GPU runs](docs/results/e0-2026-11-23.csv)
-> actually show. A [same-host paired TTFT gate](docs/paired-gate.md) now has CPU controls.
-> The first real [2048 vs 512 trial](docs/paired-gate.md#first-real-trial-small-budget)
-> is prepared, not measured. Independent GPU A/B validation, measured error rates and GPU
-> trace validation are pending.
+> actually show. The first [real vLLM A/B](docs/paired-gate.md#first-real-trial-small-budget)
+> is now measured; the eager and small-graph trials, held-out calibration and GPU trace
+> validation are still pending.
+
+## One GPU decision: 2048 vs 512 tokens per step
+
+`--max-num-batched-tokens` is vLLM's **shared token budget for one scheduler step**:
+processing a new prompt (*prefill*) and generating the next token for ongoing requests
+(*decode*) draw from that budget. A allowed **2,048** tokens per step; B allowed **512**.
+Neither number is a request count or an answer-length limit. A long prompt can span
+steps; B does not truncate it at 512. Both arms kept the same 32-sequence limit per
+step, 8,192-token context limit and 128-token output cap per performance request.
+
+| Client metric (median of six run-level p99s per arm) | A: 2048 | B: 512 |
+|---|---:|---:|
+| Wait for the first token (TTFT) | 115.46 s | 116.49 s |
+| Average time per subsequent token in a response (TPOT) | 53.34 ms | 50.63 ms |
+| Individual visible token gaps (ITL) | 152.45 ms | 58.82 ms |
+
+**Decision: pass the relative TTFT check.** B's p99 wait for the first token was
+longer in all six pairs. The median **within-pair** increase was **1.04 s**;
+the interval **[+0.96, +1.21] s** stayed below the **+2 s** margin fixed before the trial.
+This is not an absolute latency target. Streaming gaps shortened, and a separate
+four-case exact-output check passed.
+[How the budget is shared, and what the experiment does not prove](docs/paired-gate.md#first-real-trial-small-budget)
+| [Six measured pairs (CSV)](docs/results/small-budget-2026-11-25.csv)
 
 ## Why
 
@@ -78,7 +100,8 @@ The 10 ms margin applies to these fake-engine examples only, not to the GPU base
 | Same delayed setting, only 2 pairs | no finite 95% interval | Inconclusive |
 | Label the unchanged endpoint as the delayed candidate | wrong identity, interval not evaluated | Invalid measurement |
 
-All 750 measured requests returned successfully. These are [recorded CPU controls](docs/results/week3-cpu-pairs-2026-11-23.csv), not a measurement of the three planned vLLM changes or a production false-alarm rate.
+All 750 measured requests returned successfully. These [CPU controls](docs/results/week3-cpu-pairs-2026-11-23.csv)
+exercise the verdicts; they do not measure vLLM performance or a production false-alarm rate.
 
 For the separate [correctness controls](docs/correctness.md), run
 `python scripts/correctness_demo.py --out runs/correctness-demo`. The examples include a

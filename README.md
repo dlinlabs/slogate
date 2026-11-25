@@ -15,6 +15,28 @@ still a separate, unvalidated step.
 > is now measured; the eager and small-graph trials, held-out calibration and GPU trace
 > validation are still pending.
 
+## How slogate talks to vLLM
+
+The operator starts **either A or B**, one vLLM server at a time on the same RTX 4090.
+slogate sends requests, times the responses and scores the comparison. It does **not**
+set the scheduler budget through an HTTP request or patch vLLM's source code.
+
+[![Interaction diagram: slogate sends the same streaming chat requests to vLLM A and B. Only the server's per-step token budget changes. slogate times the returned chunks and judges TTFT; a separate non-streaming call checks output token IDs.](docs/figures/slogate-vllm.svg)](docs/figures/slogate-vllm.svg)
+
+| Where the value is set | What we set in the measured trial |
+|---|---|
+| **vLLM at startup: changed** | `--max-num-batched-tokens`: **2048 (A) vs 512 (B)**. This is the only launch flag that differed between performance arms. |
+| **vLLM at startup: unchanged** | `--max-num-seqs 32` (sequences per step), `--max-model-len 8192` (context), `--tensor-parallel-size 1` and `--no-enable-prefix-caching`. |
+| **slogate sends in each performance request** | `max_tokens=128` caps **one answer**; `stream=true` asks for chunks as the answer is generated. Neither sets the shared scheduler budget. |
+| **slogate only: never sent to vLLM** | Six A/B pairs; 50 ms checks on the **client** (launch lag, event-loop lag, GC pauses); **+2,000 ms** allowed TTFT p99 increase for the **relative** verdict. TPOT and ITL are reported, not used to pass the gate. |
+
+See the [actual launch flags](configs/sut/vllm-0.30.0_qwen3-4b-instruct-2507_rtx4090.json)
+and [A/B config generator](scripts/week3_candidates.py). `--enforce-eager` and smaller
+CUDA graph capture sizes (`--compilation-config`) are **separate, unmeasured** vLLM
+candidates. The [output check](docs/correctness.md#native-vllm-collection-for-the-small-budget-trial)
+uses dedicated servers with `VLLM_BATCH_INVARIANT=1`, BF16 and `FLASH_ATTN` on **both**
+arms; its timings never enter the performance gate.
+
 ## One GPU decision: 2048 vs 512 tokens per step
 
 `--max-num-batched-tokens` is vLLM's **shared token budget for one scheduler step**:

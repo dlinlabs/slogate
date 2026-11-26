@@ -15,9 +15,12 @@ import aiohttp
 import httpx
 
 from . import __version__, workload
+from ._cli_args import UsageParser
+from .correctness import add_parser as add_correctness_parser
 from .fidelity import FidelityPolicy, FidelityVerdict, assess
 from .metrics import SLO, summarize
 from .noise import MIN_RUNS, noise_floor, to_markdown
+from .paired_gate import add_parser as add_paired_parser
 from .replay import FIXTURE_EPOCH_HEADER, ReplayConfig, build_payload, replay
 from .report import (
     NOISE_JSON,
@@ -28,6 +31,7 @@ from .report import (
     write_json,
     write_run,
 )
+from .vllm_exact import add_parser as add_native_collector
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -318,9 +322,12 @@ def _add_replay_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="slogate", description=__doc__)
+    parser = UsageParser(prog="slogate", description=__doc__)
     parser.add_argument("--version", action="version", version=f"slogate {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
+    add_paired_parser(commands)
+    add_correctness_parser(commands)
+    add_native_collector(commands)
 
     run = commands.add_parser("run", help="replay a workload once and record metrics")
     _add_replay_arguments(run)

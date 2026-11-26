@@ -1,0 +1,13 @@
+{
+  "schema": "qwen3-token-suite-v1",
+  "model": "Qwen/Qwen3-4B-Instruct-2507",
+  "revision": "cdbee75f17c01a7cc42f958dc650907174af0554",
+  "tokenizer_json_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+  "max_new_tokens": 24,
+  "cases": [
+    {"id": "color", "prefix": [5598, 279, 1894, 1172, 25], "repeat": [2518], "times": 1, "suffix": [13, 198, 16141, 25]},
+    {"id": "sequence", "prefix": [3838, 374, 279, 1790, 3409, 30, 198], "repeat": [2518, 6303, 6176], "times": 8, "suffix": [11, 2518, 11]},
+    {"id": "beyond-512", "prefix": [4418, 419, 8500, 25], "repeat": [2518, 6303, 6176], "times": 180, "suffix": [13, 198, 3838, 374, 279, 1790, 3409, 30]},
+    {"id": "beyond-2048", "prefix": [4418, 419, 5383, 25], "repeat": [6176, 2518, 6303], "times": 690, "suffix": [13, 198, 5598, 279, 1790, 1894, 13]}
+  ]
+}

@@ -1,6 +1,6 @@
 # slogate design
 
-Version 0.1 (week 2). This page states what slogate claims, how it will be judged, and what
+Version 0.1 (week 3 in progress). This page states what slogate claims, how it will be judged, and what
 it deliberately does not do.
 
 ## Claim
@@ -108,7 +108,11 @@ practical effect. The predecessor lab found that treating correlated time blocks
 independent inflated nominal false passes to about 14%, so blocks within a run are never
 counted as independent samples.
 
-### Week 3 comparison contract (planned, not implemented)
+### Week 3 comparison contract
+
+The first implementation covers one run-level metric, `ttft_s.p99`, and one configuration
+change. See the [paired gate](paired-gate.md) for the capture format, signed-effect convention,
+order-statistic interval and CPU controls. The statistical error targets are not release claims.
 
 1. Before looking at B, freeze the workload digest, hardware/driver, model/tokenizer revision,
    warmup, allowed candidate change, primary metric/direction, SLO, practical regression
@@ -123,6 +127,9 @@ counted as independent samples.
    before claiming calibration; do not threshold a collection of unadjusted per-metric tests.
 
 ## Correctness
+
+The [offline correctness checker](correctness.md) checks independent evidence against
+a frozen manifest. A synthetic pass demonstrates checker behavior, not vLLM output quality.
 
 - **Scheduler-only changes:** run with `VLLM_BATCH_INVARIANT=1` and require exact token matches.
 - **Kernel, precision or version changes:** compare logprob drift and a small task evaluation
@@ -247,7 +254,7 @@ generator results, not a model speedup, an indefinite memory guarantee or a new 
 | Weeks | Deliverable |
 |---|---|
 | 1-2 | Replay, fidelity, fake engine, CPU CI, GPU executor, A/A baseline |
-| 3-4 | MVP: statistical comparison, correctness checks, three injected regressions |
+| 3-4 | MVP: paired statistical gate and independent correctness checks; two GPU candidates measured, smaller graph capture sizes unmeasured |
 | 5-6 | Cross-layer attribution |
 | 7-8 | Flagship fix: decode ITL tail under mixed prefill |
 | 9-10 | Real upgrade gate with bisect, FP8 candidate, multi-GPU module |

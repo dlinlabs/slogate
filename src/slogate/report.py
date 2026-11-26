@@ -27,6 +27,8 @@ def redact_url(url: str) -> str:
     """Drop credentials from a URL before it is persisted."""
     parts = urlsplit(url)
     host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"  # Preserve a parseable IPv6 authority after removing credentials.
     if parts.port:
         host = f"{host}:{parts.port}"
     return urlunsplit((parts.scheme, host, parts.path, "", ""))

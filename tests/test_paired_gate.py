@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import runpy
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from slogate import workload
+from slogate import cli, workload
 from slogate.cli import main
 from slogate.fidelity import FidelityPolicy, assess
 from slogate.metrics import summarize
@@ -52,8 +53,7 @@ def seal(root, name, plan_hash):
     )
 
 
-def populate(root, differences, *, bad_fidelity=None, failure=None):
-    plan, hash_ = load_plan(root)
+def samples(plan, hash_, differences, *, bad_fidelity=None, failure=None):
     w = load()
     for i, (name, arm) in enumerate(slots(plan)[: 2 * len(differences)]):
         ttft = 0.020 if arm == "A" else 0.020 + differences[i // 2] / 1000
@@ -96,6 +96,14 @@ def populate(root, differences, *, bad_fidelity=None, failure=None):
             "fidelity_policy": FidelityPolicy().to_dict(),
             "slo": {"ttft_s": None, "tpot_s": None},
         }
+        yield name, rr, meta
+
+
+def populate(root, differences, *, bad_fidelity=None, failure=None):
+    plan, hash_ = load_plan(root)
+    for name, rr, meta in samples(
+        plan, hash_, differences, bad_fidelity=bad_fidelity, failure=failure
+    ):
         write_run(root / name, rr, metrics=summarize(rr), fidelity=assess(rr).to_dict(), meta=meta)
         seal(root, name, hash_)
 
@@ -130,6 +138,39 @@ def test_no_retroactive_pairing_optional_stopping_or_flag_changes(tmp_path):
     assert main(["ab", "report", str(root)]) == 1
 
 
+def test_candidate_failure_is_a_record_exit_not_an_early_trial_verdict(tmp_path, monkeypatch):
+    root = experiment(tmp_path / "e", ceiling_ms=100)
+    plan, hash_ = load_plan(root)
+    work = workload.save(load(), tmp_path / "work.json")
+    pair = list(samples(plan, hash_, [1], failure="pair-001-B"))
+    # Double only server I/O; record still writes the measured counts, fidelity and seals.
+    monkeypatch.setattr(cli, "wait_ready", lambda *_: None)
+    monkeypatch.setattr(
+        cli, "probe_server", Mock(side_effect=[meta["server"] for _, _, meta in pair])
+    )
+    monkeypatch.setattr(cli, "warmup", AsyncMock(return_value=1))
+    monkeypatch.setattr(cli, "replay", AsyncMock(side_effect=[rr for _, rr, _ in pair]))
+    for arm, code in [("A", 0), ("B", 2)]:
+        assert record(root, arm, "http://127.0.0.1:8000", work, None, None) == code
+
+    report = evaluate(root)
+    assert report["missing_slots"] == [name for name, _ in slots(plan)[2:]]
+    assert [(r["slot"], r["requests_failed"]) for r in report["runs"]] == [
+        ("pair-001-A", 0),
+        ("pair-001-B", 1),
+    ]
+    assert not report["invalid_reasons"]
+    assert report["verdict"] == "inconclusive"
+    assert report["candidate_failed_requests"] is None
+    assert not report["paired_deltas_ms"] and report["relative"]["verdict"] == "not_evaluated"
+    assert report["candidate_absolute_slo"]["status"] == "unverified"
+    assert main(["ab", "report", str(root)]) == 4
+    assert "| pair-001-B | n/a | 1 |" in (root / "gate.md").read_text(encoding="utf-8")
+
+    (root / "pair-002-A").mkdir()  # An unfinished generic reservation outranks incompleteness.
+    assert main(["ab", "report", str(root)]) == 3
+
+
 @pytest.mark.parametrize(
     ("failure", "bad", "expect"),
     [
@@ -146,6 +187,7 @@ def test_failed_requests_and_fidelity_are_not_omitted(tmp_path, failure, bad, ex
     assert len(r["runs"]) == 12
     if failure == "pair-003-B":
         assert r["candidate_failed_requests"] == 1 and not r["paired_deltas_ms"]
+        assert main(["ab", "report", str(root)]) == 2
     else:
         assert r["invalid_reasons"]
 
@@ -380,4 +422,8 @@ def test_offline_vllm_report_requires_attested_same_device(tmp_path, flaw):
             "after": None if bad and flaw == "changed_server" else live,
         }
         write_json(p, evidence)
+    # A pinned wrapper retains its operation marker even after the capture is sealed.
+    op = root / "operations" / "pair-003-B"
+    op.mkdir(parents=True)
+    (op / "record.started").touch()
     assert evaluate(root)["verdict"] == ("pass" if flaw is None else "invalid_measurement")

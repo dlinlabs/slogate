@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Context, Decimal, InvalidOperation
 from pathlib import Path
@@ -38,9 +39,15 @@ def _nonfinite(_: str) -> Never:
     raise _Invalid("non-finite JSON number")
 
 
-def _read(
-    path: Path, role: str, digests: dict[str, str], expected_sha256: str | None = None
+def read_snapshot(
+    path: Path,
+    role: str,
+    digests: dict[str, str],
+    expected_sha256: str | None = None,
+    *,
+    parse_float: type[Decimal] | type[float] = Decimal,
 ) -> Any:
+    """Hash and strictly decode the same bytes; never reopen a file to parse it."""
     try:
         if not path.is_file():
             raise _Invalid("missing or not a regular file")
@@ -53,7 +60,7 @@ def _read(
     try:
         return json.loads(
             data.decode("utf-8"),
-            parse_float=Decimal,
+            parse_float=parse_float,
             parse_constant=_nonfinite,
             object_pairs_hook=_unique_object,
         )
@@ -149,15 +156,24 @@ class _Plan:
     max_new_tokens: int
     cases: dict[str, _Case]
     limits: _Limits | None
+    collection: dict[str, str] | None
 
 
 def _plan(value: Any) -> _Plan:
-    if not isinstance(value, dict) or value.get("schema") != "correctness-plan-v1":
-        raise _Invalid("expected schema correctness-plan-v1")
+    if not isinstance(value, dict) or value.get("schema") not in (
+        "correctness-plan-v1",
+        "correctness-plan-v2",
+    ):
+        raise _Invalid("unsupported correctness plan schema")
     mode = value.get("mode")
     if mode not in ("exact", "drift"):
         raise _Invalid("mode must be exact or drift")
     fields = "schema mode backend reference_sha256 identity protocol cases"
+    bound = value["schema"] == "correctness-plan-v2"
+    if bound:
+        if mode != "exact" or value.get("backend") != "vllm":
+            raise _Invalid("V2 binding is only supported for native exact plans")
+        fields += " collection"
     p = _fields(value, fields + (" limits" if mode == "drift" else ""), "plan")
     if p["backend"] not in ("synthetic", "vllm"):
         raise _Invalid("backend must be synthetic or vllm")
@@ -186,7 +202,16 @@ def _plan(value: Any) -> _Plan:
             if type(tol[name]) is not int or not 0 <= tol[name] <= len(cases):
                 raise _Invalid(f"{name} must be an integer in [0, case count]")
         limits = _Limits(delta, tol["min_candidate_correct"], tol["max_lost_correct"])
-    return _Plan(mode, p["backend"], ref_sha, identity, cap, cases, limits)
+    collection = None
+    if bound:
+        collection = _fields(
+            p["collection"],
+            "spec_sha256 reference_arm_pin_sha256 candidate_arm_pin_sha256",
+            "collection",
+        )
+        for name, pin in collection.items():
+            _digest(pin, name)
+    return _Plan(mode, p["backend"], ref_sha, identity, cap, cases, limits, collection)
 
 
 def _provenance(value: Any, plan: _Plan) -> dict[str, Any]:
@@ -224,10 +249,21 @@ class _Evidence:
     cases: dict[str, _Observation]
 
 
-def _evidence(value: Any, role: str, plan: _Plan) -> _Evidence:
-    e = _fields(value, "schema role provenance identity protocol cases", "evidence")
-    if e["schema"] != "correctness-evidence-v1" or e["role"] != role:
-        raise _Invalid(f"expected correctness-evidence-v1 with role {role}")
+def _evidence(value: Any, role: str, plan: _Plan, plan_sha256: str) -> _Evidence:
+    names = "schema role provenance identity protocol cases"
+    e = _fields(value, names + (" collection" if plan.collection else ""), "evidence")
+    schema = "correctness-evidence-v2" if plan.collection else "correctness-evidence-v1"
+    if e["schema"] != schema or e["role"] != role:
+        raise _Invalid(f"expected {schema} with role {role}")
+    if plan.collection:
+        expected = {
+            "spec_sha256": plan.collection["spec_sha256"],
+            "arm_pin_sha256": plan.collection[f"{role}_arm_pin_sha256"],
+        }
+        if role == "candidate":
+            expected["plan_sha256"] = plan_sha256
+        if e["collection"] != expected:
+            raise _Invalid("collection binding differs from the frozen plan for this role")
     provenance = _provenance(e["provenance"], plan)
     identity = _fields(e["identity"], _IDENTITY, "identity")
     for name, pinned in plan.identity.items():
@@ -365,28 +401,64 @@ def check(
     plan_path: Path, reference_path: Path, candidate_path: Path, *, plan_sha256: str | None = None
 ) -> dict[str, Any]:
     """Check snapshots without modifying them. A bad plan is not a failed model comparison."""
-    digests: dict[str, str] = {}
+    return _check_files(plan_path, reference_path, candidate_path, plan_sha256, {})
+
+
+def _check_files(
+    plan_path: Path,
+    reference_path: Path,
+    candidate_path: Path,
+    plan_sha256: str | None,
+    digests: dict[str, str],
+    verify_collection: Callable[[dict], dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """A native receipt verifier supplies evidence pins, not a verdict or replacement JSON."""
     report: dict[str, Any] = {"schema": "correctness-report-v1", "sha256": digests}
     try:
         if plan_sha256 is not None:
             _digest(plan_sha256, "plan_sha256")
-        plan = _plan(_read(plan_path, "plan", digests, plan_sha256))
+        doc = read_snapshot(plan_path, "plan", digests, plan_sha256)
+        plan = _plan(doc)
     except _Invalid as exc:
         return {**report, "status": "error", "reason": f"plan: {exc}"}
     report.update(mode=plan.mode, backend=plan.backend, planned_cases=len(plan.cases))
-    phase = "reference"
+    phase = "collection"
     try:
-        ref = _evidence(_read(reference_path, phase, digests, plan.reference_sha256), phase, plan)
+        candidate_sha256 = None
+        if verify_collection is not None:
+            pins = verify_collection(doc)
+            if pins["reference"] != plan.reference_sha256:
+                raise _Invalid("reference receipt does not pin the frozen reference")
+            candidate_sha256 = _digest(pins["candidate"], "candidate receipt evidence_sha256")
+            report["native_binding"] = "v2+receipts" if plan.collection else "v1-receipts"
+        elif plan.backend == "vllm" and plan.mode == "exact" and plan.collection is None:
+            raise _Invalid(
+                "unbound V1 native exact evidence; use vllm-exact report with both receipts"
+            )
+        elif plan.collection:
+            report["native_binding"] = "v2"
+        phase = "reference"
+        ref = _evidence(
+            read_snapshot(reference_path, phase, digests, plan.reference_sha256),
+            phase,
+            plan,
+            digests["plan"],
+        )
         phase = "candidate"
-        cand = _evidence(_read(candidate_path, phase, digests), phase, plan)
+        cand = _evidence(
+            read_snapshot(candidate_path, phase, digests, candidate_sha256),
+            phase,
+            plan,
+            digests["plan"],
+        )
         phase = "comparison"
         return {**report, **_score(plan, ref, cand)}
-    except _Invalid as exc:
+    except ValueError as exc:
         return {**report, "status": "unverified", "reason": f"{phase}: {exc}"}
 
 
 def _configure(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--plan", type=Path, required=True, help="frozen correctness-plan-v1 JSON")
+    parser.add_argument("--plan", type=Path, required=True, help="frozen correctness plan JSON")
     parser.add_argument(
         "--plan-sha256", help="optional independently saved digest of the plan bytes"
     )

@@ -13,6 +13,10 @@ from urllib.parse import urlsplit
 
 from .paired_plan import digest, local_url, require, serve_flags
 
+ISOLATED_PYTHON = ("-I", "-B")
+_API_MODULE = ("-m", "vllm.entrypoints.openai.api_server")
+CORRECTNESS_LAUNCHER = (*ISOLATED_PYTHON, *_API_MODULE)
+
 
 def listener_inodes(process: Path, address: str, port: int) -> set[str]:
     ipv6 = ":" in address
@@ -30,6 +34,13 @@ def listener_inodes(process: Path, address: str, port: int) -> set[str]:
 def process_instance(pid: int) -> str:
     started = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
     return digest([pid, started])
+
+
+def _listener_flags(argv: list[str], *, batch_invariant: bool) -> dict[str, list[str]]:
+    launcher = CORRECTNESS_LAUNCHER if batch_invariant else _API_MODULE
+    start = 1 + len(launcher)
+    require(tuple(argv[1:start]) == launcher, "unsupported vLLM module launcher for this run")
+    return serve_flags(argv[start:])
 
 
 def verify_server(
@@ -62,10 +73,6 @@ def verify_server(
             continue  # A transient request socket can close during enumeration.
     require(found, "declared process does not own the measured listener")
     argv = [os.fsdecode(v) for v in (proc / "cmdline").read_bytes().split(b"\0") if v]
-    require(
-        len(argv) >= 3 and argv[1:3] == ["-m", "vllm.entrypoints.openai.api_server"],
-        "unsupported vLLM argv: cannot verify the reference module launcher",
-    )
     model, rev = expected["model"]["id"], expected["model"]["revision"]
     fixed = {
         "--model": [model],
@@ -75,7 +82,7 @@ def verify_server(
         "--port": [str(port)],
     }
     require(
-        serve_flags(argv[3:]) == expected["flags"] | fixed,
+        _listener_flags(argv, batch_invariant=batch_invariant) == expected["flags"] | fixed,
         "live vLLM launch options differ from pinned arm",
     )
     # Only inspect two mode switches on the already identified listener. Never persist

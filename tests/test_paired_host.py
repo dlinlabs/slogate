@@ -6,12 +6,14 @@ import runpy
 import socket
 import subprocess
 import sys
+import sysconfig
+import venv
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from slogate.paired_host import verify_server
+from slogate.paired_host import _listener_flags, verify_server
 from slogate.paired_plan import digest
 
 
@@ -27,11 +29,46 @@ def test_collect_host_emits_fingerprint_not_raw_gpu_uuid(monkeypatch):
     assert "GPU-unit-id" not in device.values()
 
 
+@pytest.mark.parametrize(
+    ("switches", "invariant", "accepted"),
+    [
+        ([], False, True),
+        (["-I", "-B"], True, True),
+        ([], True, False),
+        (["-B"], True, False),
+        (["-I", "-B"], False, False),
+    ],
+)
+def test_listener_requires_the_launcher_for_this_mode(switches, invariant, accepted):
+    argv = [
+        "engine-python",
+        *switches,
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--port",
+        "8000",
+    ]
+    if accepted:
+        assert _listener_flags(argv, batch_invariant=invariant) == {"--port": ["8000"]}
+    else:
+        with pytest.raises(ValueError, match="module launcher"):
+            _listener_flags(argv, batch_invariant=invariant)
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="reference launcher uses Linux procfs")
 @pytest.mark.parametrize("invariant", [False, True])
-def test_live_listener_argv_and_device(tmp_path, monkeypatch, invariant):
+@pytest.mark.parametrize("wrong_env", [False, True])
+def test_live_listener_argv_and_device(tmp_path, monkeypatch, invariant, wrong_env):
     # A test double owns a real loopback listener with the reference launcher's argv.
-    package = tmp_path / "vllm" / "entrypoints" / "openai"
+    python, lib = sys.executable, tmp_path
+    if invariant:
+        # Isolated Python deliberately cannot load the stub from cwd/PYTHONPATH.
+        env = tmp_path / "engine"
+        # Keep relocatable CPython's shared library next to the original executable.
+        venv.EnvBuilder(with_pip=False, symlinks=True).create(env)
+        python = str(env / "bin/python")
+        lib = Path(sysconfig.get_path("purelib", "venv", {"base": str(env), "platbase": str(env)}))
+    package = lib / "vllm" / "entrypoints" / "openai"
     package.mkdir(parents=True)
     for directory in (package, package.parent, package.parent.parent):
         (directory / "__init__.py").touch()
@@ -49,7 +86,8 @@ def test_live_listener_argv_and_device(tmp_path, monkeypatch, invariant):
         url = f"http://127.0.0.1:{port}"
         proc = subprocess.Popen(
             [
-                sys.executable,
+                python,
+                *(["-I", "-B"] if invariant else []),
                 "-m",
                 "vllm.entrypoints.openai.api_server",
                 "--model",
@@ -73,7 +111,7 @@ def test_live_listener_argv_and_device(tmp_path, monkeypatch, invariant):
                 **os.environ,
                 "PYTHONPATH": str(tmp_path),
                 "SLOGATE_TRACE_DIR": "",
-                "VLLM_BATCH_INVARIANT": "1" if invariant else "0",
+                "VLLM_BATCH_INVARIANT": "1" if invariant != wrong_env else "0",
             },
         )
         try:
@@ -82,8 +120,12 @@ def test_live_listener_argv_and_device(tmp_path, monkeypatch, invariant):
             def verify(pin=expected, gpu=device):
                 return verify_server(proc.pid, url, pin, gpu, batch_invariant=invariant)
 
+            if wrong_env:
+                with pytest.raises(ValueError, match="batch-invariance mode"):
+                    verify()
+                return
             assert verify()["pin_sha256"] == digest(expected)
-            with pytest.raises(ValueError, match="batch-invariance mode"):
+            with pytest.raises(ValueError, match="module launcher"):
                 verify_server(proc.pid, url, expected, device, batch_invariant=not invariant)
             with pytest.raises(ValueError, match="launch options"):
                 verify(dict(expected, flags={}))

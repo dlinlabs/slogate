@@ -15,9 +15,9 @@ from typing import Any
 import httpx
 
 from ._cli_args import UsageParser
-from .correctness import EXIT, check
+from .correctness import EXIT, _check_files, read_snapshot
 from .native_tokens import MODEL, REVISION, TOKENIZER, json_reply, observed_cases, suite_cases
-from .paired_host import process_instance, verify_server
+from .paired_host import CORRECTNESS_LAUNCHER, ISOLATED_PYTHON, process_instance, verify_server
 from .paired_plan import digest, file_digest, load_plan, require
 from .report import write_json
 
@@ -92,49 +92,131 @@ def prepare(ab: Path, suite_path: Path, out: Path) -> str:
     return file_digest(out / "spec.json")
 
 
-def _read_spec(root: Path, expected: str) -> dict:
-    data = (root / "spec.json").read_bytes()
-    require(
-        hashlib.sha256(data).hexdigest() == expected,
-        "collection spec checksum differs from trusted pin",
-    )
-    spec = json.loads(data)
+def _read_spec(root: Path, expected: str, digests: dict[str, str]) -> dict:
+    require(bool(expected), "trusted collection spec pin required")
+    # Arm pins use the paired plan's canonical JSON numbers, not scoring Decimals.
+    spec = read_snapshot(root / "spec.json", "spec", digests, expected, parse_float=float)
     require(
         spec["schema"] == "vllm-exact-collection-v1"
+        and isinstance(spec["ab_plan_sha256"], str)
+        and re.fullmatch("[0-9a-f]{64}", spec["ab_plan_sha256"]) is not None
+        and isinstance(spec["protocol"], dict)
+        and isinstance(spec["arms"], dict)
+        and spec["arms"].keys() == {"A", "B"}
+        and all(isinstance(arm, dict) for arm in spec["arms"].values())
         and spec["identity"]["suite_sha256"] == digest(spec["cases"]),
         "invalid collection spec",
     )
     return spec
 
 
-def _plan(spec: dict, ref_hash: str) -> dict:
-    return {
-        "schema": "correctness-plan-v1",
+def _plan(spec: dict, ref_hash: str, spec_hash: str | None) -> dict:
+    plan = {
+        "schema": "correctness-plan-v2" if spec_hash else "correctness-plan-v1",
         "mode": "exact",
         "backend": "vllm",
         "reference_sha256": ref_hash,
         **{key: spec[key] for key in ("identity", "protocol", "cases")},
     }
+    if spec_hash is not None:
+        plan["collection"] = {
+            "spec_sha256": spec_hash,
+            **{
+                f"{role}_arm_pin_sha256": digest(_pin(spec, role))
+                for role in ("reference", "candidate")
+            },
+        }
+    return plan
 
 
-def _reference(root: Path, spec: dict, spec_hash: str, plan_hash: str | None) -> tuple[Path, Path]:
-    r, p = root / "reference" / "evidence.json", root / "reference" / "plan.json"
+def _receipt_pin(
+    receipt: dict, role: str, spec: dict, spec_hash: str, plan: dict, plan_hash: str
+) -> str:
+    # V1 B receipts predate the explicit A plan pin. They do attest the unique AB
+    # plan, exact spec, listener arm and evidence bytes. Never infer these from tokens.
     require(
-        plan_hash is not None and file_digest(p) == plan_hash, "trusted reference plan pin required"
+        isinstance(receipt, dict)
+        and receipt.get("status") == "collected"
+        and receipt.get("role") == role
+        and receipt.get("ab_plan_sha256") == spec["ab_plan_sha256"]
+        and receipt.get("spec_sha256") == spec_hash
+        and receipt.get("arm_pin_sha256") == digest(_pin(spec, role))
+        and receipt.get("singleton_vs_batch") == "matched_on_this_suite"
+        and type(receipt.get("cases")) is int
+        and receipt["cases"] == len(spec["cases"])
+        and isinstance(receipt.get("engine_instance"), str)
+        and re.fullmatch("[0-9a-f]{64}", receipt["engine_instance"]) is not None
+        and isinstance(receipt.get("evidence_sha256"), str)
+        and re.fullmatch("[0-9a-f]{64}", receipt["evidence_sha256"]) is not None,
+        f"{role} collection receipt incomplete or binding mismatch",
     )
-    receipt = json.loads((r.parent / "receipt.json").read_bytes())
+    if role == "reference" or plan["schema"] != "correctness-plan-v1" or "plan_sha256" in receipt:
+        require(receipt.get("plan_sha256") == plan_hash, f"{role} receipt plan pin mismatch")
+    if role == "reference":
+        require(receipt["evidence_sha256"] == plan["reference_sha256"], "reference digest mismatch")
+    return receipt["evidence_sha256"]
+
+
+def _reference(root: Path, spec: dict, spec_hash: str, plan_hash: str | None) -> dict:
+    if not plan_hash:
+        raise ValueError("trusted reference plan pin required")
+    digests: dict[str, str] = {}
+    arm = root / "reference"
+    plan = read_snapshot(arm / "plan.json", "plan", digests, plan_hash)
     require(
-        receipt["status"] == "collected"
-        and receipt["role"] == "reference"
-        and receipt["ab_plan_sha256"] == spec["ab_plan_sha256"]
-        and receipt["spec_sha256"] == spec_hash
-        and receipt["arm_pin_sha256"] == digest(_pin(spec, "reference"))
-        and receipt["plan_sha256"] == plan_hash
-        and receipt["evidence_sha256"] == file_digest(r)
-        and json.loads(p.read_bytes()) == _plan(spec, file_digest(r)),
-        "reference binding mismatch",
+        plan == _plan(spec, plan["reference_sha256"], spec_hash), "reference plan binding mismatch"
     )
-    return r, p
+    receipt = read_snapshot(arm / "receipt.json", "reference_receipt", digests)
+    pin = _receipt_pin(receipt, "reference", spec, spec_hash, plan, plan_hash)
+    return read_snapshot(arm / "evidence.json", "reference", digests, pin)
+
+
+def _report(
+    root: Path, spec_hash: str, plan_hash: str, *, pending_candidate: dict | None = None
+) -> dict:
+    """Score original bytes. During capture the new B receipt has not yet been published."""
+    digests: dict[str, str] = {}
+    try:
+        require(bool(plan_hash), "trusted reference plan pin required")
+        spec = _read_spec(root, spec_hash, digests)
+    except ERRORS as exc:
+        return {
+            "schema": "correctness-report-v1",
+            "sha256": digests,
+            "status": "error",
+            "reason": str(exc),
+        }
+
+    def verify(plan: dict) -> dict[str, str]:
+        legacy = plan["schema"] == "correctness-plan-v1"
+        require(
+            plan == _plan(spec, plan["reference_sha256"], None if legacy else spec_hash)
+            and not (legacy and pending_candidate is not None),
+            "reference plan does not match the pinned native spec",
+        )
+        pins = {}
+        for role in ("reference", "candidate"):
+            if role == "candidate" and pending_candidate is not None:
+                receipt = pending_candidate
+            else:
+                try:
+                    receipt = read_snapshot(
+                        root / role / "receipt.json", f"{role}_receipt", digests
+                    )
+                except ValueError as exc:
+                    raise ValueError(f"{role} receipt: {exc}") from exc
+            pins[role] = _receipt_pin(receipt, role, spec, spec_hash, plan, plan_hash)
+        return pins
+
+    ref = root / "reference"
+    return _check_files(
+        ref / "plan.json",
+        ref / "evidence.json",
+        root / "candidate/evidence.json",
+        plan_hash,
+        digests,
+        verify_collection=verify,
+    )
 
 
 def _pin(spec: dict, role: str) -> dict:
@@ -144,8 +226,7 @@ def _pin(spec: dict, role: str) -> dict:
 def server_argv(expected: dict, port: int, python: Path) -> list[str]:
     args = [
         str(python.absolute()),
-        "-m",
-        "vllm.entrypoints.openai.api_server",
+        *CORRECTNESS_LAUNCHER,
         "--model",
         MODEL,
         "--revision",
@@ -169,7 +250,11 @@ def _engine_build(python: str) -> dict:
         "torch=str(torch.__version__), cuda_runtime=torch.version.cuda)))"
     )
     raw = subprocess.run(
-        [python, "-I", "-B", "-c", probe], check=True, capture_output=True, text=True, timeout=60
+        [python, *ISOLATED_PYTHON, "-c", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
     ).stdout
     build = json.loads(raw)
     require(build == {"python": "3.12.3", **ENGINE}, "incorrect engine interpreter/build")
@@ -250,10 +335,10 @@ def collect(
     try:
         expected, log = _pin(spec, role), root / f"{role}.server.log"
         before = _runtime_stamp(pid, port, expected, log)
+        require(before["pin_sha256"] == digest(expected), "attested listener pin differs from arm")
         if baseline is not None:
             require(
-                json.loads(baseline[0].read_bytes())["provenance"]["hardware"]
-                == before["hardware"],
+                baseline["provenance"]["hardware"] == before["hardware"],
                 "correctness arms are not on the same GPU and driver",
             )
         with httpx.Client(
@@ -294,13 +379,16 @@ def collect(
             "batch_invariance_supported": True,
         }
         evidence = {
-            "schema": "correctness-evidence-v1",
+            "schema": "correctness-evidence-v2",
             "role": role,
+            "collection": {"spec_sha256": spec_hash, "arm_pin_sha256": before["pin_sha256"]},
             "provenance": provenance,
             "identity": spec["identity"],
             "protocol": spec["protocol"],
             "cases": cases,
         }
+        if role == "candidate":
+            evidence["collection"]["plan_sha256"] = receipt["plan_sha256"] = plan_hash
         e = arm / "evidence.json"
         write_json(e, evidence)
         sha = file_digest(e)
@@ -315,11 +403,11 @@ def collect(
         rc = 0
         if baseline is None:
             p = arm / "plan.json"
-            write_json(p, _plan(spec, sha))
+            write_json(p, _plan(spec, sha, spec_hash))
             receipt["plan_sha256"] = file_digest(p)
         else:
-            ref, frozen_plan = _reference(root, spec, spec_hash, plan_hash)
-            verdict = check(frozen_plan, ref, e, plan_sha256=plan_hash)
+            assert plan_hash is not None  # _reference checked the independent pin before capture.
+            verdict = _report(root, spec_hash, plan_hash, pending_candidate=receipt)
             write_json(arm / "report.json", verdict)
             receipt["correctness"] = verdict["status"]
             rc = EXIT[verdict["status"]]
@@ -339,6 +427,12 @@ def _configure(parser: argparse.ArgumentParser) -> None:
     init = sub.add_parser("prepare", help="local only: expand frozen token suite and bind A/B plan")
     for arg in ("ab", "suite", "out"):
         init.add_argument(f"--{arg}", type=Path, required=True)
+    offline = sub.add_parser("report", help="offline: verify both collection receipts and rescore")
+    offline.add_argument("directory", type=Path)
+    offline.add_argument("--spec-sha256", required=True, help="independently saved exact spec pin")
+    offline.add_argument(
+        "--plan-sha256", required=True, help="independently saved A reference plan pin"
+    )
     for name in ("server", "capture"):
         cmd = sub.add_parser(
             name,
@@ -371,9 +465,13 @@ def _command(args: argparse.Namespace) -> int:
             sha = prepare(args.ab, args.suite, args.out)
             print(f"Prepared correctness spec (no model run): {sha}")
             return 0
+        if args.operation == "report":
+            verdict = _report(args.directory, args.spec_sha256, args.plan_sha256)
+            print(json.dumps(verdict, indent=2, sort_keys=True, allow_nan=False))
+            return EXIT[verdict["status"]]
         require(1 <= args.port <= 65535, "invalid port")
         root = args.directory
-        spec = _read_spec(root, args.spec_sha256)
+        spec = _read_spec(root, args.spec_sha256, {})
         if args.operation == "server":
             expected = _pin(spec, args.role)
             argv_ = server_argv(expected, args.port, args.engine_python)

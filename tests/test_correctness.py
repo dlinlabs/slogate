@@ -36,6 +36,19 @@ def _toy(mode: str = "exact", backend: str = "synthetic") -> tuple[Doc, Doc, Doc
         }
         if mode == "exact":
             provenance.update(VLLM_BATCH_INVARIANT="1", batch_invariance_supported=True)
+            plan.update(
+                schema="correctness-plan-v2",
+                collection={
+                    "spec_sha256": "e" * 64,
+                    "reference_arm_pin_sha256": "a" * 64,
+                    "candidate_arm_pin_sha256": "b" * 64,
+                },
+            )
+            for doc, pin in ((ref, "a" * 64), (cand, "b" * 64)):
+                doc.update(
+                    schema="correctness-evidence-v2",
+                    collection={"spec_sha256": "e" * 64, "arm_pin_sha256": pin},
+                )
         ref["provenance"], cand["provenance"] = provenance, deepcopy(provenance)
     return plan, ref, cand
 
@@ -52,6 +65,8 @@ def _freeze(root: Path, plan: Doc, ref: Doc, cand: Doc) -> Files:
     p, r, c = root / "plan.json", root / "reference.json", root / "candidate.json"
     _dump(r, ref)
     _dump(p, {"reference_sha256": _sha(r), **plan})
+    if cand["schema"] == "correctness-evidence-v2":
+        cand = {**cand, "collection": {**cand["collection"], "plan_sha256": _sha(p)}}
     _dump(c, cand)
     return p, r, c
 
@@ -258,6 +273,42 @@ def test_modes_distinguish_version_kernel_precision_changes(tmp_path) -> None:
     assert check(*_freeze(tmp_path, plan, ref, cand))["status"] == "pass"
     cand["provenance"]["hardware"] = "other-host"
     assert check(*_freeze(tmp_path, plan, ref, cand))["status"] == "unverified"
+
+
+@pytest.mark.parametrize(
+    ("role", "key"),
+    [
+        ("reference", "arm_pin_sha256"),
+        ("reference", "spec_sha256"),
+        ("candidate", "arm_pin_sha256"),
+        ("candidate", "spec_sha256"),
+        ("candidate", "plan_sha256"),
+    ],
+)
+def test_native_exact_checks_every_role_binding(tmp_path, role, key) -> None:
+    plan, ref, cand = _toy(backend="vllm")
+    if role == "reference":
+        ref["collection"][key] = cand["collection"][key] if key == "arm_pin_sha256" else "f" * 64
+    p, r, c = _freeze(tmp_path, plan, ref, cand)
+    if role == "candidate":
+        doc = json.loads(c.read_bytes())
+        doc["collection"][key] = ref["collection"][key] if key == "arm_pin_sha256" else "f" * 64
+        _dump(c, doc)
+    result = check(p, r, c, plan_sha256=_sha(p))
+    assert result["status"] == "unverified" and result["reason"].startswith(f"{role}: collection")
+
+
+def test_native_v2_does_not_accept_content_only_candidate(tmp_path) -> None:
+    p, r, c = _freeze(tmp_path, *_toy(backend="vllm"))
+    doc = json.loads(c.read_bytes())
+    doc.pop("collection")
+    doc["schema"] = "correctness-evidence-v1"
+    _dump(c, doc)
+    result = check(p, r, c, plan_sha256=_sha(p))
+    assert (
+        result["status"] == "unverified"
+        and "candidate: evidence: missing collection" in result["reason"]
+    )
 
 
 def test_unresolved_backend_on_both_arms_does_not_establish_support(tmp_path) -> None:

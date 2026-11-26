@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from slogate import paired_plan, workload
-from slogate.cli import build_parser
+from slogate.cli import build_parser, main
 from slogate.paired_gate import evaluate
 from slogate.paired_plan import digest, file_digest, load_plan
 from slogate.report import RECORDS_FILE, RUN_FILE, write_json
@@ -309,19 +309,43 @@ def test_one_slot_at_a_time_retain_even_a_candidate_failure(sb, host, trial, cap
 @pytest.mark.parametrize("fault", ["wrong-manifest", "invalid-collector"])
 def test_failed_attempt_is_not_a_new_slot(sb, trial, host, fault):
     slot = "pair-001-A"
+    ab = trial[0] / "ab"
     op = probed(sb, trial, slot)
     if fault == "wrong-manifest":
         info = sb.read(op / "sut-info.json")
         info["config"] = sb.read(trial[0] / "candidate.json")
         write_json(op / "sut-info.json", info)
         assert take(sb, trial, slot) == 1 and not host["commands"]
+        assert not (op / "result.json").exists()
     else:
         host["exit"] = 3
         assert take(sb, trial, slot) == 3 and sb.read(op / "result.json")["exit"] == 3
     assert (op / "record.started").exists()
+    assert not (ab / slot).exists()
+    assert main(["ab", "report", str(ab)]) == 3
+    report = sb.read(ab / "gate.json")
+    assert report["verdict"] == "invalid_measurement"
+    assert report["missing_slots"] == sb.read(trial[0] / "receipt.json")["slots"][1:]
+    assert any(slot in reason and "seal" in reason for reason in report["invalid_reasons"])
     for cmd in ("slot", "begin"):
         assert sb.main(command(trial, cmd)) == 1
     assert take(sb, trial, slot) == 1 and sb.main(command(trial, slot="pair-001-B")) == 1
+
+
+def test_preview_is_unattempted_but_begin_reserves_a_slot(sb, trial, host):
+    root, _ = trial
+    ab = root / "ab"
+    assert sb.main(command(trial)) == 0
+    unattempted = evaluate(ab)
+    assert unattempted["verdict"] == "inconclusive"
+    assert unattempted["missing_slots"] == sb.read(root / "receipt.json")["slots"]
+
+    (ab / "operations").mkdir()  # Only a slot's own operation directory reserves it.
+    assert evaluate(ab) == unattempted
+    assert sb.main(command(trial, "begin")) == 0 and not host["commands"]
+    report = evaluate(ab)
+    assert report["verdict"] == "invalid_measurement"
+    assert report["missing_slots"] == unattempted["missing_slots"][1:]
 
 
 @pytest.mark.parametrize(("key", "value"), [("pids", [17]), ("listeners", "LISTEN")])

@@ -357,11 +357,14 @@ def evaluate(root: Path) -> dict[str, Any]:
     if extra:
         issues.append(f"unplanned slots present: {', '.join(sorted(extra))}")
     for name, arm in schedule:
-        if not (root / name).exists():
+        slot_exists = (root / name).exists()
+        # The wrapper reserves operations/<slot> with mkdir before invoking ab record.
+        if not slot_exists and not (root / "operations" / name).is_dir():
             missing.append(name)
             continue
         r = None
         try:
+            require(slot_exists, "operation reserved without a sealed capture")
             require(not missing, "gap in the preassigned sequence")
             r = _inspect(root, name, arm, plan, hash_)
             if first_rig is None:
@@ -403,10 +406,10 @@ def evaluate(root: Path) -> dict[str, Any]:
             "invalid_measurement",
             "invalid or noncomparable evidence; no pairs were silently dropped",
         )
-    elif n_failed:
-        verdict, reason = "fail", "candidate request failures; latency of survivors is not a pass"
     elif missing:
         verdict, reason = "inconclusive", "not all preassigned pairs were collected"
+    elif n_failed:
+        verdict, reason = "fail", "candidate request failures; latency of survivors is not a pass"
     else:
         deltas = [
             observed[i + 1]["ttft_p99_ms"] - observed[i]["ttft_p99_ms"]

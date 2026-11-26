@@ -116,7 +116,7 @@ GPU-relevant margin separately. The generator does not start engines or spend GP
 
 | Candidate | Only change from E0 | Status |
 |---|---|---|
-| `eager` | add `--enforce-eager` | Not measured |
+| `eager` | add `--enforce-eager` at the original 2048 budget | [Frozen protocol; not measured](#second-trial-eager-execution) |
 | `small-graphs` | set `--compilation-config '{"cudagraph_capture_sizes":[1,2,4,8]}'` | Not measured |
 | `small-budget` | set `--max-num-batched-tokens` from 2048 to 512 | [Measured: 6/6 pairs, relative TTFT pass](#first-real-trial-small-budget) |
 
@@ -217,3 +217,50 @@ window from host preflight through off-host archive verification was **59.89 min
 not a billing reading or a guarantee that a repeat fits in 60 minutes. If an approved
 window is insufficient, retain partial slots and report incomplete evidence rather
 than changing the number of pairs. Preparation itself needs no Pod.
+
+### Second trial: eager execution
+
+**Decision, set before seeing B:** with the token budget back at **2048 on both arms**,
+does forcing eager execution increase run-level TTFT p99 by **2,000 ms** or more?
+A is the pinned E0 launch; B is exactly A plus `--enforce-eager`. In
+[vLLM 0.30.0](https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/config/vllm.py)
+the flag disables **both torch.compile and CUDA Graphs**. A uses the default execution
+policy; we do not assume every step replays a graph. A difference would measure the
+effect of the flag, not isolate either mechanism. No worker trace is part of this gate.
+
+| Fixed before measurement | Rule |
+|---|---|
+| System and load | Same single RTX 4090, software/model pins, 32 sequences, 8,192-token context. Replay all 787 arrivals over 30 s with `max_tokens=128`. |
+| Sample | Six **new** adjacent A/B pairs in fixed order, two warmup requests per run, one pair per block. Never borrow an A from E0 or the 512 trial. |
+| Performance | Unchanged 50 ms client checks and normal GC. Compare paired TTFT p99 (B minus A) against **+2,000 ms**, no absolute SLO. TPOT/ITL are secondary, not alternate ways to pass. |
+| Correctness | Capture fresh native output IDs for A and B on separate correctness-only services. Same frozen four prompts, greedy, at most 24 output tokens. This checks the suite in batch-invariant mode, not all production outputs. |
+
+Local preparation and **read-only** preview (fresh output directory, no server):
+
+```bash
+"$CLIENT_PYTHON" scripts/prepare_eager.py prepare --out "$TRIAL" \
+  --workload workloads/azure-2024-05-12-smoke-30s.json.gz
+"$CLIENT_PYTHON" -m slogate vllm-exact prepare --ab "$TRIAL/ab" \
+  --suite configs/correctness/qwen3-small-budget.json --out "$TRIAL/exact"
+# Save the printed receipt, AB plan and exact spec digests independently.
+"$CLIENT_PYTHON" scripts/prepare_eager.py slot "$TRIAL" --slot pair-001-A \
+  --receipt-sha256 "$RECEIPT_SHA"
+```
+
+For a delivered, frozen trial, **verify its supplied pins and skip both `prepare`
+commands**. The suite filename is historical; it contributes only the prompts and
+decoding protocol, not the arm flags or previous outputs. Use only `prepare_eager.py`
+for performance slots; it rejects the 512 receipt and vice versa.
+
+Only after separate host and time-budget authorization, follow the
+[native-ID capture steps](correctness.md#native-vllm-collection-for-the-small-budget-trial)
+on the **new** exact spec. Save A's new reference plan digest off-host before B.
+If correctness fails or is unverified, preserve the attempt and stop. Otherwise
+use each performance `slot` preview's `begin`/probe/start/`record` steps in order.
+For every slot record a fresh manifest and actual listener PID, then release only its
+own server. Finish with `"$CLIENT_PYTHON" -m slogate ab report "$TRIAL/ab"`.
+Read the [exit codes](#collect-a-comparison): an interval touching +2,000 ms is
+inconclusive, bad measurements are invalid, and an empty plan is **not a pass**.
+The previous trial's elapsed time does not guarantee this one fits in 60 GPU-minutes.
+At the approved deadline keep partial evidence; never rerun a slot, extend the budget
+or change the decision rule to finish. Export and verify before any Pod lifecycle action.

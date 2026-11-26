@@ -235,9 +235,9 @@ def host(sb, monkeypatch):
     return state
 
 
-def probed(sb, trial, slot):
+def probed(sb, trial, slot, *, candidate="small-budget"):
     root, _ = trial
-    assert sb.main(command(trial, "begin", slot)) == 0
+    assert sb.main(command(trial, "begin", slot), candidate=candidate) == 0
     op = root / "ab/operations" / slot
     cfg = sb.read(root / sb.CONFIG[slot[-1]])
     write_json(op / "engine.json", cfg["engine"]["expect"])
@@ -250,6 +250,36 @@ def probed(sb, trial, slot):
 
 def take(sb, trial, slot):
     return sb.main([*command(trial, "record", slot), "--server-pid", "1234"])
+
+
+def test_eager_protocol_cannot_mix_trials_or_skip_a_and_only_adds_eager_to_b(
+    sb, host, trial, small_input, tmp_path, capsys
+):
+    eager_cli = importlib.import_module("prepare_eager").main
+    root = tmp_path / "eager"
+    assert eager_cli(["prepare", "--out", str(root), "--workload", str(small_input[0])]) == 0
+    pins = json.loads(capsys.readouterr().out)
+    eager = (root, pins["receipt_sha256"])
+    doc = sb.read(root / "receipt.json")
+    plan, sha = load_plan(root / "ab")
+    assert doc["schema"] == "eager-performance-v1" and sha == pins["ab_plan_sha256"]
+    a, b = (plan["arms"][arm]["flags"] for arm in "AB")
+    assert a[sb.FLAG] == ["2048"] and b == {**a, "--enforce-eager": []}
+    assert plan["change"] == ["--enforce-eager"]
+    assert (plan["pairs"], plan["margin_ms"], plan["candidate_ceiling_ms"]) == (6, 2000, None)
+    assert evaluate(root / "ab")["missing_slots"] == doc["slots"]
+    assert sb.main(command(eager)) == 1 and eager_cli(command(trial)) == 1
+    assert eager_cli(command(eager, slot="pair-001-B")) == 1
+    assert not (root / "ab/operations").exists()
+    assert eager_cli(command(eager)) == 0
+    first = capsys.readouterr().out
+    assert "scripts/prepare_eager.py begin" in first and "--enforce-eager" not in first
+    probed(sb, eager, "pair-001-A", candidate="eager")
+    assert eager_cli([*command(eager, "record"), "--server-pid", "1234"]) == 0
+    assert eager_cli(command(eager, slot="pair-001-B")) == 0
+    second = capsys.readouterr().out
+    assert "scripts/prepare_eager.py record" in second and f"{sb.FLAG} 2048" in second
+    assert "--enforce-eager" in second and 'CFG="$TRIAL/candidate.json"' in second
 
 
 def test_one_slot_at_a_time_retain_even_a_candidate_failure(sb, host, trial, capsys):

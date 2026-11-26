@@ -23,10 +23,13 @@ BASE = ROOT / "configs/sut/vllm-0.30.0_qwen3-4b-instruct-2507_rtx4090.json"
 SUITE = ROOT / "configs/correctness/qwen3-small-budget.json"
 
 
-def configured(tmp_path):
+def configured(tmp_path, *, eager=False):
     a = json.loads(BASE.read_bytes())
     argv = list(a["serve_args"])
-    argv[argv.index("--max-num-batched-tokens") + 1] = "512"
+    if eager:
+        argv.append("--enforce-eager")
+    else:
+        argv[argv.index("--max-num-batched-tokens") + 1] = "512"
     w = Workload("tiny", MODEL, 1.0, (Request("x", 0.0, 1, 4, "hi"),))
     p = tmp_path / "ab"
     freeze(
@@ -116,8 +119,11 @@ def take(root, sha, role, pin=None):
 
 
 @pytest.mark.parametrize("delta, expected", [(0, 0), (1, 2)])
-def test_collected_native_outputs_feed_the_offline_gate(tmp_path, monkeypatch, delta, expected):
-    root, sha = configured(tmp_path)
+@pytest.mark.parametrize("eager", [False, True])
+def test_collected_native_outputs_feed_the_offline_gate(
+    tmp_path, monkeypatch, delta, expected, eager
+):
+    root, sha = configured(tmp_path, eager=eager)
     state = {"stamps": 0, "calls": 0}
     wire(monkeypatch, state)
     assert take(root, sha, "candidate") == 4 and state["calls"] == 0
@@ -178,12 +184,15 @@ def test_failed_or_incomplete_attempt_cannot_greenlight_a_candidate(tmp_path, mo
             assert state["calls"] == 0
 
 
-def test_server_preview_never_invokes_model_or_needs_credentials(tmp_path, monkeypatch, capsys):
-    root, sha = configured(tmp_path)
+@pytest.mark.parametrize("eager", [False, True])
+def test_server_preview_never_invokes_model_or_needs_credentials(
+    tmp_path, monkeypatch, capsys, eager
+):
+    root, sha = configured(tmp_path, eager=eager)
     capsys.readouterr()
     monkeypatch.delenv("VLLM_API_KEY", raising=False)
     monkeypatch.setattr(exact.os, "execve", lambda *_: pytest.fail("preview started an engine"))
-    for role, budget in (("reference", "2048"), ("candidate", "512")):
+    for role, budget in (("reference", "2048"), ("candidate", "2048" if eager else "512")):
         cmd = [
             "server",
             str(root),
@@ -199,10 +208,38 @@ def test_server_preview_never_invokes_model_or_needs_credentials(tmp_path, monke
         assert manifest["preview_only"] and manifest["env"] == {"VLLM_BATCH_INVARIANT": "1"}
         argv = manifest["argv"]
         assert argv[argv.index("--max-num-batched-tokens") + 1] == budget
+        assert ("--enforce-eager" in argv) == (role == "candidate" and eager)
         assert argv[argv.index("--generation-config") + 1] == "vllm"
         assert argv[argv.index("--attention-backend") + 1] == "FLASH_ATTN"
         assert not (root / f"{role}.server.log").exists()
         assert exact.main([*cmd, "--execute"]) == 1 and not (root / f"{role}.server.log").exists()
+
+
+@pytest.mark.parametrize("wrong", ["baseline-budget", "reversed", "other-flag"])
+def test_eager_exact_does_not_accept_other_single_change_plans(tmp_path, wrong):
+    a = json.loads(BASE.read_bytes())
+    if wrong == "baseline-budget":
+        a["serve_args"][a["serve_args"].index("--max-num-batched-tokens") + 1] = "512"
+    flag = "--disable-log-requests" if wrong == "other-flag" else "--enforce-eager"
+    b = {**a, "serve_args": [*a["serve_args"], flag]}
+    if wrong == "reversed":
+        a, b = b, a
+    w = Workload("fixture", MODEL, 1.0, (Request("x", 0.0, 1, 4, "test"),))
+    freeze(
+        tmp_path / "ab",
+        w,
+        kind="vllm",
+        baseline=a,
+        candidate=b,
+        pairs=6,
+        block_pairs=1,
+        margin_ms=2000,
+        ceiling_ms=None,
+        warmup_requests=1,
+    )
+    with pytest.raises(ValueError, match=r"expected a pinned|unexpected reference"):
+        exact.prepare(tmp_path / "ab", SUITE, tmp_path / "exact")
+    assert not (tmp_path / "exact").exists()
 
 
 def test_engine_build_probe_isolated_from_client_and_checks_every_pin(monkeypatch):

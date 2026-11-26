@@ -1,4 +1,4 @@
-"""Prepare and collect native token-ID evidence for the pinned 2048 vs 512 reference trial."""
+"""Collect native token-ID evidence for the pinned small-budget and eager reference trials."""
 
 from __future__ import annotations
 
@@ -43,25 +43,28 @@ def prepare(ab: Path, suite_path: Path, out: Path) -> str:
     plan, plan_hash = load_plan(ab)
     suite = json.loads(suite_path.read_bytes())
     cases = suite_cases(suite)
+    base_flags = {
+        "--max-num-batched-tokens": ["2048"],
+        "--max-model-len": ["8192"],
+        "--max-num-seqs": ["32"],
+        "--tensor-parallel-size": ["1"],
+        "--no-enable-prefix-caching": [],
+    }
+    overrides = {"--max-num-batched-tokens": ["512"], "--enforce-eager": []}
+    changes = plan["change"]
     require(
-        plan["kind"] == "vllm" and plan["change"] == ["--max-num-batched-tokens"],
-        "not a one-change token-budget plan",
+        plan["kind"] == "vllm" and len(changes) == 1 and changes[0] in overrides,
+        "expected a pinned small-budget or eager candidate",
     )
+    changed = changes[0]
     arms = {}
-    for arm, budget in (("A", "2048"), ("B", "512")):
+    for arm, flags in (("A", base_flags), ("B", {**base_flags, changed: overrides[changed]})):
         p = plan["arms"][arm]
         require(
             p["model"] == {"id": MODEL, "revision": REVISION}
             and p["engine"]["expect"] == ENGINE
             and p["hardware"] == {"gpu_count": 1, "gpu_name_contains": "RTX 4090"}
-            and p["flags"]
-            == {
-                "--max-num-batched-tokens": [budget],
-                "--max-model-len": ["8192"],
-                "--max-num-seqs": ["32"],
-                "--tensor-parallel-size": ["1"],
-                "--no-enable-prefix-caching": [],
-            },
+            and p["flags"] == flags,
             "unexpected reference model, runtime or configuration",
         )
         arms[arm] = {**p, "flags": {**p["flags"], **EXTRA}}

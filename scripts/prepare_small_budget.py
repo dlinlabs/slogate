@@ -10,6 +10,7 @@ just the named next slot; it does not reserve it, contact a service or require L
 Use the same prepared engine/client venvs, local model cache, physical GPU, private
 environment and port throughout. Do not run the exact-token service at the same time.
 Keep the entire trial, including unfinished operations; never replace/recycle a slot.
+The eager entry point shares the same slot protocol but requires its own candidate and pins.
 """
 
 from __future__ import annotations
@@ -44,6 +45,10 @@ WORK = "workload.json.gz"
 CONFIG = {"A": "baseline.json", "B": "candidate.json"}
 FILES = (*CONFIG.values(), WORK, "ab/plan.json")
 FLAG = "--max-num-batched-tokens"
+TRIALS = {
+    "small-budget": (FLAG, "scripts/prepare_small_budget.py"),
+    "eager": ("--enforce-eager", "scripts/prepare_eager.py"),
+}
 URL = "http://127.0.0.1:8000"
 KEY = "VLLM_API_KEY"
 ENV = {"HF_HUB_OFFLINE": "1", "VLLM_BATCH_INVARIANT": "0", "PYTHONNOUSERSITE": "1"}
@@ -90,7 +95,10 @@ def checked_path(root: Path, rel: str) -> Path:
     return path
 
 
-def receipt(root: Path, trusted_files: dict | None = None) -> dict:
+def receipt(
+    root: Path, trusted_files: dict | None = None, *, candidate: str = "small-budget"
+) -> dict:
+    require(candidate in TRIALS, "unsupported trial")
     for name in FILES:
         require(checked_path(root, name).is_file(), f"missing trial input: {name}")
     hashes = {name: file_digest(root / name) for name in FILES}
@@ -98,14 +106,14 @@ def receipt(root: Path, trusted_files: dict | None = None) -> dict:
         require(hashes == trusted_files, "trial file SHA-256 mismatch")
     a, b = (read(root / name) for name in CONFIG.values())
     require(digest(a) == BASE_DIGEST, "not the pinned E0 baseline")
-    require(b == candidates(a)["small-budget"], "not the prescribed small-budget candidate")
+    require(b == candidates(a)[candidate], f"not the prescribed {candidate} candidate")
     w = checked_work(root / WORK)
     plan, sha = load_plan(root / "ab")
     expected = {
         **DESIGN,
         "kind": "vllm",
         "candidate_ceiling_ms": None,
-        "change": [FLAG],
+        "change": [TRIALS[candidate][0]],
         "arms": {"A": pin("vllm", a), "B": pin("vllm", b)},
         "workload": w.summary(),
         "layout": [[r.id, r.arrival_s, r.max_tokens] for r in w.requests],
@@ -122,9 +130,8 @@ def receipt(root: Path, trusted_files: dict | None = None) -> dict:
     }
     for k, v in expected.items():
         require(plan[k] == v, f"not the preregistered {k}")
-    require(plan["arms"]["B"]["flags"][FLAG] == ["512"], "wrong candidate budget")
     return {
-        "schema": "small-budget-performance-v1",
+        "schema": f"{candidate}-performance-v1",
         "ab_plan_sha256": sha,
         "file_sha256": hashes,
         "workload_sha256": w.digest,
@@ -138,12 +145,13 @@ def receipt(root: Path, trusted_files: dict | None = None) -> dict:
     }
 
 
-def prepare(out: Path, work: Path) -> dict:
+def prepare(out: Path, work: Path, *, candidate: str = "small-budget") -> dict:
     require(version("aiohttp") == TRANSPORT["version"], "prepare with E0 aiohttp==3.14.5")
+    require(candidate in TRIALS, "unsupported trial")
     w = checked_work(work)
     a = read(BASE)
     require(digest(a) == BASE_DIGEST, "not the pinned E0 baseline")
-    b = candidates(a)["small-budget"]
+    b = candidates(a)[candidate]
     out.mkdir(parents=True, exist_ok=False)
     write_json(out / CONFIG["A"], a)
     write_json(out / CONFIG["B"], b)
@@ -152,19 +160,22 @@ def prepare(out: Path, work: Path) -> dict:
     else:
         workload.save(w, out / WORK)
     sha = freeze(out / "ab", w, kind="vllm", baseline=a, candidate=b, ceiling_ms=None, **DESIGN)
-    doc = receipt(out)
+    doc = receipt(out, candidate=candidate)
     require(doc["ab_plan_sha256"] == sha, "plan changed during preparation")
     write_json(out / "receipt.json", doc)  # Last: a partial preparation cannot authorize a slot.
     return {"receipt_sha256": file_digest(out / "receipt.json"), "ab_plan_sha256": sha}
 
 
 def checked_slot(
-    root: Path, trusted: str, slot: str, *, recording: bool = False
+    root: Path, trusted: str, slot: str, *, recording: bool = False, candidate: str = "small-budget"
 ) -> tuple[str, Path]:
     path = checked_path(root, "receipt.json")
     require(file_digest(path) == trusted, "receipt differs from the separately saved SHA-256")
     doc = read(path)
-    require(doc == receipt(root, doc["file_sha256"]), "receipt does not bind these trial files")
+    require(
+        doc == receipt(root, doc["file_sha256"], candidate=candidate),
+        "receipt does not bind these trial files",
+    )
     order = doc["slots"]
     require(slot in order, "unknown preassigned slot")
     prior = set(order[: order.index(slot)])
@@ -217,8 +228,10 @@ def engine_args(config: dict) -> list[str]:
     ]
 
 
-def recipe(slot: str, arm: str, trusted: str, config: dict) -> str:
-    guard = '"$CLIENT_PYTHON" scripts/prepare_small_budget.py'
+def recipe(
+    slot: str, arm: str, trusted: str, config: dict, *, candidate: str = "small-budget"
+) -> str:
+    guard = f'"$CLIENT_PYTHON" {TRIALS[candidate][1]}'
     args = f'"$TRIAL" --slot {slot} --receipt-sha256 {trusted}'
     return f"""# ONE slot ({slot}); manual steps, not an unattended launch script.
 # Only on an authorized exclusive Linux host with host PID/GPU visibility, same operator,
@@ -419,9 +432,12 @@ def record(root: Path, trusted: str, slot: str, arm: str, op: Path, pid: int) ->
     return code
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, candidate: str = "small-budget") -> int:
     parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawTextHelpFormatter
+        description=__doc__
+        if candidate == "small-budget"
+        else "E0 vs --enforce-eager: prepare, preview or record the frozen trial.",
+        formatter_class=argparse.RawTextHelpFormatter,
     )
     ops = parser.add_subparsers(dest="command", required=True)
     prep = ops.add_parser("prepare", help="freeze a never-run trial in a NEW directory")
@@ -444,12 +460,14 @@ def main(argv: list[str] | None = None) -> int:
     opts = parser.parse_args(args)
     try:
         if opts.command == "prepare":
-            print(json.dumps(prepare(opts.out, opts.workload), sort_keys=True))
+            print(json.dumps(prepare(opts.out, opts.workload, candidate=candidate), sort_keys=True))
         else:
             root, trusted, slot = opts.trial, opts.receipt_sha256, opts.slot
-            arm, op = checked_slot(root, trusted, slot, recording=opts.command == "record")
+            arm, op = checked_slot(
+                root, trusted, slot, recording=opts.command == "record", candidate=candidate
+            )
             if opts.command == "slot":
-                print(recipe(slot, arm, trusted, read(root / CONFIG[arm])))
+                print(recipe(slot, arm, trusted, read(root / CONFIG[arm]), candidate=candidate))
             elif opts.command == "begin":
                 begin(root, trusted, slot, op)
             else:
@@ -464,7 +482,7 @@ def main(argv: list[str] | None = None) -> int:
         ImportError,
         subprocess.SubprocessError,
     ) as exc:
-        print(f"small-budget: {exc}", file=sys.stderr)
+        print(f"{candidate}: {exc}", file=sys.stderr)
         return 1
 
 

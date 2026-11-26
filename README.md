@@ -31,9 +31,9 @@ set the scheduler budget through an HTTP request or patch vLLM's source code.
 | **slogate only: never sent to vLLM** | Six A/B pairs; 50 ms checks on the **client** (launch lag, event-loop lag, GC pauses); **+2,000 ms** allowed TTFT p99 increase for the **relative** verdict. TPOT and ITL are reported, not used to pass the gate. |
 
 See the [actual launch flags](configs/sut/vllm-0.30.0_qwen3-4b-instruct-2507_rtx4090.json)
-and [A/B config generator](scripts/week3_candidates.py). `--enforce-eager` and smaller
-CUDA graph capture sizes (`--compilation-config`) are **separate, unmeasured** vLLM
-candidates. The [output check](docs/correctness.md#native-vllm-collection-for-the-small-budget-trial)
+and [A/B config generator](scripts/week3_candidates.py). The [eager trial](docs/paired-gate.md#second-trial-eager-execution)
+and smaller CUDA graph capture sizes (`--compilation-config`) are **separate, unmeasured**
+vLLM candidates. The [output check](docs/correctness.md#native-vllm-collection-for-the-small-budget-trial)
 uses dedicated servers with `VLLM_BATCH_INVARIANT=1`, BF16 and `FLASH_ATTN` on **both**
 arms; its timings never enter the performance gate.
 

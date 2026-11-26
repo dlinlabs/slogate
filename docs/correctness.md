@@ -12,6 +12,11 @@ RTX 4090 and vLLM 0.30.0. Only `capture` contacts an already-authorized local se
 `server` prints argv by default; it starts the engine only with `--execute`. Preparing
 an experiment or installing slogate does not require vLLM, Torch, model weights or a GPU.
 
+The collector also accepts the [eager trial](paired-gate.md#second-trial-eager-execution):
+both arms use a 2048-token budget and only B has `--enforce-eager`. The same commands
+below apply with that trial's **own** AB plan, exact spec and fresh A reference. The
+collector checks the entire flag map; a 512-budget eager arm is not a supported plan.
+
 The [suite](../configs/correctness/qwen3-small-budget.json) fixes four non-sensitive
 **input ID** sequences (10, 34, 552 and 2,081 tokens) and a 24-token output cap. They are
 raw text-completion token sequences, not a model-quality benchmark or a chat-template test.

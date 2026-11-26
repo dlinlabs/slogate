@@ -75,10 +75,14 @@ independence, and fixed AB order does not remove systematic within-pair time tre
 | 1 | Usage, plan or I/O error |
 
 Each attempted slot remains on disk, including invalid measurements. A reserved slot
-without a completed seal is invalid, not a slot that may be overwritten. The MVP requires
-all planned pairs: no post hoc exclusions, early statistical decisions or replacement
-samples. Set `--candidate-ceiling-ms` **at init** to also check an absolute per-run
-TTFT p99 requirement on B. Without a supplied ceiling the absolute SLO is `not_configured`.
+without a completed seal is invalid, even if the wrapper stopped before creating its
+capture directory. Previewing a slot does not reserve it. If collection stopped before
+starting the remaining slots and all collected evidence is valid, the experiment is
+inconclusive; any observed candidate request failures are still visible per slot. A
+complete plan with a candidate request failure fails. There are no post hoc exclusions,
+early statistical decisions or replacement samples. Set `--candidate-ceiling-ms` **at
+init** to also check an absolute per-run TTFT p99 requirement on B. Without a supplied
+ceiling the absolute SLO is `not_configured`.
 The [correctness command](correctness.md) checks different evidence; volume of streamed
 tokens is not a substitute for actual token IDs or scores on matched prefixes.
 
@@ -116,7 +120,7 @@ GPU-relevant margin separately. The generator does not start engines or spend GP
 
 | Candidate | Only change from E0 | Status |
 |---|---|---|
-| `eager` | add `--enforce-eager` at the original 2048 budget | [Frozen protocol; not measured](#second-trial-eager-execution) |
+| `eager` | add `--enforce-eager` at the original 2048 budget | [Measured: 6/6 pairs, relative TTFT pass](#second-trial-eager-execution) |
 | `small-graphs` | set `--compilation-config '{"cudagraph_capture_sizes":[1,2,4,8]}'` | Not measured |
 | `small-budget` | set `--max-num-batched-tokens` from 2048 to 512 | [Measured: 6/6 pairs, relative TTFT pass](#first-real-trial-small-budget) |
 
@@ -234,6 +238,23 @@ effect of the flag, not isolate either mechanism. No worker trace is part of thi
 | Sample | Six **new** adjacent A/B pairs in fixed order, two warmup requests per run, one pair per block. Never borrow an A from E0 or the 512 trial. |
 | Performance | Unchanged 50 ms client checks and normal GC. Compare paired TTFT p99 (B minus A) against **+2,000 ms**, no absolute SLO. TPOT/ITL are secondary, not alternate ways to pass. |
 | Correctness | Capture fresh native output IDs for A and B on separate correctness-only services. Same frozen four prompts, greedy, at most 24 output tokens. This checks the suite in batch-invariant mode, not all production outputs. |
+
+**Measured, 2026-11-26 UTC.** All 12 slots passed the original 50 ms checks and
+completed 787/787 requests each; none were excluded or rerun. The TTFT p99 was
+higher with eager in **6/6 pairs**. The median paired increase was **+1,788.09 ms**,
+with a two-sided sign interval of **[+1,737.37, +1,917.70] ms** (96.875% nominal
+coverage under independent pairs). Its upper bound was **82.30 ms below** the
+predeclared +2,000 ms margin: relative **pass**, not a speedup or an absolute SLO.
+Fixed A-before-B ordering does not exclude time drift.
+
+TPOT p99 went from **53.46 to 54.11 ms/token** and visible ITL p99 from **151.90
+to 152.54 ms** (medians of the six run p99s per arm). Visible token counts differed
+from final usage on 178 A streams and 186 B streams; these gaps are not kernel times.
+The separate native-ID test passed all four cases with 24 matching output IDs per
+case. The single-GPU window from preflight through off-host archive verification was
+**43.90 minutes**, not a billing measurement. [All six pairs, in ms](results/eager-2026-11-26.csv).
+Trial source: [`47da967`](https://github.com/dlinlabs/slogate/commit/47da96701d079dc1e97f1ea899ad2484a23ab689).
+Both historical native collections can be [rescored from their original receipts](correctness.md#offline-native-recheck).
 
 Local preparation and **read-only** preview (fresh output directory, no server):
 

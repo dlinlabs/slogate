@@ -254,7 +254,7 @@ generator results, not a model speedup, an indefinite memory guarantee or a new 
 | Weeks | Deliverable |
 |---|---|
 | 1-2 | Replay, fidelity, fake engine, CPU CI, GPU executor, A/A baseline |
-| 3-4 | MVP: statistical comparison, correctness checks, three injected regressions |
+| 3-4 | MVP: paired statistical gate and independent correctness checks; two GPU candidates measured, smaller graph capture sizes unmeasured |
 | 5-6 | Cross-layer attribution |
 | 7-8 | Flagship fix: decode ITL tail under mixed prefill |
 | 9-10 | Real upgrade gate with bisect, FP8 candidate, multi-GPU module |
